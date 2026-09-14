@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE version SYSTEM "../../../lib/pkp/dtd/pluginVersion.dtd">
+<version>
+	<application>journalPayment</application>
+	<type>plugins.generic</type>
+	<release>1.28.4.0</release>
+	<date>2026-09-14</date>
+	<!--
+		Do not lazy-load this route provider. Historical releases used changing
+		class names while preserving one plugin-settings identity. Loading the
+		plugin unconditionally ensures its LoadHandler hook is registered even
+		when an older product_class_name remains in the OJS versions table.
+	-->
+	<lazy-load>0</lazy-load>
+	<class>JournalPaymentPlugin</class>
+</version>
