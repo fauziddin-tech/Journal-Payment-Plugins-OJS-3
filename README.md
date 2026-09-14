@@ -100,6 +100,6 @@ Repositori ini sedang dilengkapi dengan source versi stabil, dokumentasi, checks
 
 ## Pengembang
 
-**Dr. Moh Fauziddin, A.Ag., M.Pd.**
+Moh Fauziddin
 
 Dikembangkan untuk mendukung pengelolaan pembayaran dan alur publikasi jurnal berbasis OJS.
