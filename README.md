@@ -74,6 +74,11 @@ Pembatasan izin PDF mencegah perubahan melalui pembaca/editor PDF yang mematuhi 
 - `files_dir/journalPayment` harus dapat ditulis oleh PHP dan tetap berada di luar direktori publik.
 - Bila TCPDF tidak ditemukan, plugin tidak membuat dokumen HTML yang tampak terlindungi; pengguna menerima pesan konfigurasi dan paket plugin lengkap perlu diunggah ulang.
 
+## Panduan
+
+- [Menghubungkan Google Drive (tab Folder GD)](GOOGLE-DRIVE.md) — langkah lengkap membuat Client ID, Client Secret, dan Refresh Token beserta tautan langsung ke halaman Google Cloud.
+- [Upgrade dari OJS 3.3 ke OJS 3.5](PANDUAN-UPGRADE-OJS35.md) — urutan upgrade dan checklist uji setelah pemasangan.
+
 ## Instalasi
 
 1. Buat cadangan basis data dan folder OJS.
