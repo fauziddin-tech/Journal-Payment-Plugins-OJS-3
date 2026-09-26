@@ -28,7 +28,7 @@
 		</form>
 		{else}
 		<h2>Keputusan Telah Dicatat</h2>
-		<dl><div><dt>Status</dt><dd>{$proofreadingStatusLabel|escape}</dd></div>{if $proofreading->responded_name}<div><dt>Identitas</dt><dd>{$proofreading->responded_name|escape}</dd></div>{/if}{if $proofreading->responded_at}<div><dt>Waktu</dt><dd>{$proofreading->responded_at|date_format:"%d-%m-%Y %H:%M"}</dd></div>{/if}</dl>
+		<dl><div><dt>Status</dt><dd>{$proofreadingStatusLabel|escape}</dd></div>{if $proofreading->responded_name}<div><dt>Identitas</dt><dd>{$proofreading->responded_name|escape}</dd></div>{/if}{if $proofreading->responded_at}<div><dt>Waktu</dt><dd>{$proofreading->responded_at|jp_date:"d-m-Y H:i"}</dd></div>{/if}</dl>
 		{if $proofreading->author_notes}<div class="jp-proof-note"><strong>Catatan penulis</strong><p>{$proofreading->author_notes|escape|nl2br}</p></div>{/if}
 		{/if}
 	</section>

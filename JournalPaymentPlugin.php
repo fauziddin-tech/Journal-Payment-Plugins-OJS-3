@@ -22,7 +22,7 @@ use PKP\plugins\Hook;
 use PKP\security\Role;
 
 class JournalPaymentPlugin extends GenericPlugin {
-	const ASSET_VERSION = '2.0.0';
+	const ASSET_VERSION = '2.0.1';
 
 	/** Preserve the plugin-settings identity used by every 1.x release. */
 	public function getName() {
@@ -86,6 +86,22 @@ class JournalPaymentPlugin extends GenericPlugin {
 				$templateMgr->registerPlugin('modifier', $modifier, $modifier);
 			}
 		}
+		if (empty($templateMgr->registered_plugins['modifier']['jp_date'])) {
+			$templateMgr->registerPlugin('modifier', 'jp_date', array(self::class, 'formatDate'));
+		}
+	}
+
+	/**
+	 * Date modifier for the payment templates. OJS 3.5 replaces Smarty's
+	 * date_format with a Carbon-based version that expects PHP date() patterns
+	 * and turns empty values into "now"; this keeps empty dates empty.
+	 */
+	public static function formatDate($value, $format = 'd-m-Y') {
+		if ($value === null || $value === '' || $value === false) return '';
+		if (is_string($value) && strpos($value, '0000-00-00') === 0) return '';
+		$timestamp = is_numeric($value) ? (int) $value : strtotime((string) $value);
+		if ($timestamp === false || $timestamp <= 0) return '';
+		return date((string) $format, $timestamp);
 	}
 
 	public function getInstallMigration() {

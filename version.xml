@@ -3,7 +3,7 @@
 <version>
 	<application>journalPayment</application>
 	<type>plugins.generic</type>
-	<release>2.0.0.0</release>
+	<release>2.0.1.0</release>
 	<date>2026-09-26</date>
 	<!--
 		Keep this plugin always loaded so its LoadHandler hook is registered

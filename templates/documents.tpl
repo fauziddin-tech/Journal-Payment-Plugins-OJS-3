@@ -16,7 +16,7 @@
 			<div class="jp-result-head"><div><span class="jp-kicker">ID Artikel {$record->article_id|escape}</span><h2>{$record->payer_name|escape}</h2></div><span class="jp-badge jp-verified">Pembayaran Terverifikasi</span></div>
 			{if $record->article_title}<p><strong>Judul Artikel</strong><br>{$record->article_title|escape}</p>{/if}
 			{if $record->issue_volume && $record->issue_number && $record->issue_year}<p><strong>Terbitan:</strong> Volume {$record->issue_volume|escape}, Nomor {$record->issue_number|escape}, Tahun {$record->issue_year|escape}</p>{/if}
-			{if $record->publication_date}<p><strong>Prediksi/Tanggal Terbit:</strong> {$record->publication_date|date_format:"%d-%m-%Y"}</p>{/if}
+			{if $record->publication_date}<p><strong>Prediksi/Tanggal Terbit:</strong> {$record->publication_date|jp_date:"d-m-Y"}</p>{/if}
 			{if !$record->document_access_granted}<p class="jp-muted">Dokumen dilindungi. Buka tautan aman yang dikirim melalui email jurnal untuk melihat atau mengunduhnya.</p>{/if}
 			<div class="jp-document-list">
 				<div><span>Kuitansi Pembayaran</span><strong>Tersedia</strong>{if $record->document_access_granted}<a class="jp-button jp-document-preview" href="{url page="journalPayment" op="receipt" articleId=$record->article_id access=$record->document_access_token}" data-preview-name="Kuitansi Pembayaran">Lihat Kuitansi</a>{/if}</div>

@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.0.1 — 2026-09-26
+
+- Memperbaiki tampilan tanggal pada dashboard (Riwayat Perubahan, Riwayat Email, Keuangan, Production Editor, Folder GD, proofreading) dan halaman publik yang tampil sebagai `%26-%09-%2026 %14:%Sep:%th`. OJS 3.5 mengganti modifier `date_format` dengan versi berbasis Carbon; template kini memakai modifier `jp_date` milik plugin yang juga membiarkan tanggal kosong tetap kosong.
+- Panduan Google Drive dilengkapi tautan langsung ke Google Cloud Console, langkah Refresh Token melalui OAuth Playground, dan tabel pemecahan masalah.
+
 ## 2.0.0 — 2026-09-26
 
 Rilis porting untuk **OJS 3.5.0-x**. Tidak kompatibel dengan OJS 3.3; gunakan 1.28.4 untuk OJS 3.3.
