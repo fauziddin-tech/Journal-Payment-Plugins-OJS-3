@@ -22,7 +22,6 @@ use PKP\plugins\Hook;
 use PKP\security\Role;
 
 class JournalPaymentPlugin extends GenericPlugin {
-	const ASSET_VERSION = '2.0.1';
 
 	/** Preserve the plugin-settings identity used by every 1.x release. */
 	public function getName() {
@@ -47,11 +46,28 @@ class JournalPaymentPlugin extends GenericPlugin {
 	}
 
 	public function getDescription() {
-		return 'Mengelola pembayaran publikasi, verifikasi bukti, status, kuitansi, LOA, dan Sertifikat Publikasi di dalam OJS.';
+		return 'Mengelola pembayaran publikasi, verifikasi bukti, status, kuitansi, LOA, dan Sertifikat Publikasi di dalam OJS. Versi terpasang: ' . self::getPluginVersion() . '.';
+	}
+
+	/**
+	 * Installed release read from this plugin's own version.xml, so the number
+	 * shown to users always matches the files on the server. "2.0.2.0" -> "2.0.2".
+	 */
+	public static function getPluginVersion() {
+		static $version = null;
+		if ($version !== null) return $version;
+		$version = '0';
+		$xml = @file_get_contents(__DIR__ . '/version.xml');
+		if ($xml !== false && preg_match('#<release>\s*([0-9]+(?:\.[0-9]+){0,3})\s*</release>#', $xml, $match)) {
+			$parts = explode('.', $match[1]);
+			while (count($parts) > 3 && end($parts) === '0') array_pop($parts);
+			$version = implode('.', $parts);
+		}
+		return $version;
 	}
 
 	public function getAssetVersion() {
-		return self::ASSET_VERSION;
+		return self::getPluginVersion();
 	}
 
 	/** IDs explicitly trusted to manage every payment in a journal. */
@@ -86,6 +102,7 @@ class JournalPaymentPlugin extends GenericPlugin {
 				$templateMgr->registerPlugin('modifier', $modifier, $modifier);
 			}
 		}
+		$templateMgr->assign('journalPaymentVersion', self::getPluginVersion());
 		if (empty($templateMgr->registered_plugins['modifier']['jp_date'])) {
 			$templateMgr->registerPlugin('modifier', 'jp_date', array(self::class, 'formatDate'));
 		}

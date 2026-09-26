@@ -191,6 +191,7 @@ class JournalPaymentSettingsForm extends Form {
 		unset($staff);
 		TemplateManager::getManager($request)->assign(array(
 			'pluginName' => $this->plugin->getName(),
+			'journalPaymentVersion' => JournalPaymentPlugin::getPluginVersion(),
 			'documentLogoPreview' => $context ? $this->plugin->getDocumentAssetDataUri($context->getId(), 'documentLogoFile') : '',
 			'signaturePreview' => $context ? $this->plugin->getDocumentAssetDataUri($context->getId(), 'signatureFile') : '',
 			'stampPreview' => $context ? $this->plugin->getDocumentAssetDataUri($context->getId(), 'stampFile') : '',

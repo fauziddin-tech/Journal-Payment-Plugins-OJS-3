@@ -1,6 +1,6 @@
 # Journal Payment for OJS 3.5
 
-Plugin pembayaran publikasi manual versi **2.0.1** untuk **OJS 3.5.0-x**, dengan target utama **OJS 3.5.0-5**. Untuk OJS 3.3 gunakan rilis 1.28.4 pada branch [`ojs-3.3`](../../tree/ojs-3.3). Editor membuka tab native **Pembayaran** dan hanya dapat melihat pembayaran submission yang ditugaskan kepadanya pada workflow OJS; tidak ada penugasan kedua di plugin. Site Administrator dan akun yang dipilih sebagai **Pengelola Pembayaran dengan Akses Penuh** dapat melihat seluruh transaksi, statistik jurnal, laporan keuangan, fee Production Editor, Folder GD, dan Audit. Dashboard juga menyediakan prioritas operasional, tenggat revisi, pengingat email, Publication Journey, PDF terlindungi, pengelolaan file publikasi Google Drive, serta persetujuan proofreading galley akhir oleh penulis.
+Plugin pembayaran publikasi manual versi **2.0.2** untuk **OJS 3.5.0-x**, dengan target utama **OJS 3.5.0-5**. Untuk OJS 3.3 gunakan rilis 1.28.4 pada branch [`ojs-3.3`](../../tree/ojs-3.3). Editor membuka tab native **Pembayaran** dan hanya dapat melihat pembayaran submission yang ditugaskan kepadanya pada workflow OJS; tidak ada penugasan kedua di plugin. Site Administrator dan akun yang dipilih sebagai **Pengelola Pembayaran dengan Akses Penuh** dapat melihat seluruh transaksi, statistik jurnal, laporan keuangan, fee Production Editor, Folder GD, dan Audit. Dashboard juga menyediakan prioritas operasional, tenggat revisi, pengingat email, Publication Journey, PDF terlindungi, pengelolaan file publikasi Google Drive, serta persetujuan proofreading galley akhir oleh penulis.
 
 ## Fitur
 
@@ -84,7 +84,7 @@ Pembatasan izin PDF mencegah perubahan melalui pembaca/editor PDF yang mematuhi 
 1. Buat cadangan basis data dan folder OJS.
 2. Masuk sebagai Site Administrator.
 3. Buka **Settings > Website > Plugins > Upload A New Plugin**.
-4. Unggah `journalPayment-v2.0.1-ojs3.5.zip` (atau `.tar.gz`) dari halaman Releases GitHub. Jangan mengunggah file `.sha256`.
+4. Unggah `journalPayment-v2.0.2-ojs3.5.zip` (atau `.tar.gz`) dari halaman Releases GitHub. Jangan mengunggah file `.sha256`.
 5. Aktifkan **Pembayaran Jurnal** pada kelompok Generic Plugins.
 6. Klik **Pengaturan**, tentukan akun **Pengelola Pembayaran dengan Akses Penuh**, lalu isi penerbit, rekening/petunjuk, metode, tarif, mode tema, penandatangan dokumen, dan batas unggahan.
 7. Klik **Kelola Pembayaran** untuk membuka dashboard pengelola.
@@ -105,7 +105,7 @@ Setelah pemasangan manual, buka **Administration > Hosted Journals**, atau jalan
 2. Nonaktifkan plugin dari daftar plugin OJS jika halaman masih dapat dibuka.
 3. Melalui cPanel, hapus hanya folder `plugins/generic/journalPayment` lama. Jangan menghapus tabel database atau folder bukti di `files_dir/journalPayment`.
 4. Bersihkan Data Cache dan Template Cache OJS.
-5. Unggah `journalPayment-v2.0.1-ojs3.5.tar.gz` melalui **Upload A New Plugin**.
+5. Unggah `journalPayment-v2.0.2-ojs3.5.tar.gz` melalui **Upload A New Plugin**.
 6. Aktifkan kembali **Journal Payment / Pembayaran Jurnal**.
 7. Buka Pengaturan, pilih akun berakses penuh, lalu periksa kembali rekening, tarif, tampilan, dan penandatangan dokumen.
 8. Buka Kelola Pembayaran. Plugin akan menggunakan kembali tabel dan bukti pembayaran lama bila masih tersedia.

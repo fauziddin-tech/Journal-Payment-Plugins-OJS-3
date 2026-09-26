@@ -90,6 +90,7 @@
 <form class="pkp_form" id="journalPaymentSettings" method="POST"
 	action="{url router=PKP\core\PKPApplication::ROUTE_COMPONENT op="manage" category="generic" plugin=$pluginName verb="settings" save=true}">
 	{csrf}
+	<p class="jp-version-note" style="margin:0 0 16px;color:#5f6b7a">Journal Payment <strong>versi {$journalPaymentVersion|escape}</strong> · <a href="https://github.com/fauziddin-tech/Journal-Payment-Plugins-OJS-3/releases" target="_blank" rel="noopener">Catatan rilis</a></p>
 	{fbvFormArea id="journalPaymentSettingsArea"}
 		<div class="section formButtons" style="text-align:left;border:0;padding:0;margin:0">
 			<h3 style="margin:0 0 16px">Identitas dan Tampilan</h3>

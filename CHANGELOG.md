@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.0.2 — 2026-09-26
+
+- Versi plugin yang terpasang kini tampil di deskripsi plugin (Installed Plugins), di bagian atas jendela Pengaturan, dan di header dashboard Pembayaran. Nomor versi dibaca langsung dari `version.xml`.
+- Versi aset CSS/JS mengikuti versi plugin secara otomatis sehingga browser selalu memuat berkas terbaru setelah pembaruan.
+
 ## 2.0.1 — 2026-09-26
 
 - Memperbaiki tampilan tanggal pada dashboard (Riwayat Perubahan, Riwayat Email, Keuangan, Production Editor, Folder GD, proofreading) dan halaman publik yang tampil sebagai `%26-%09-%2026 %14:%Sep:%th`. OJS 3.5 mengganti modifier `date_format` dengan versi berbasis Carbon; template kini memakai modifier `jp_date` milik plugin yang juga membiarkan tanggal kosong tetap kosong.
