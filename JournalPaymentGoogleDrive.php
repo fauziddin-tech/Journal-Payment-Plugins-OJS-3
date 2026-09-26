@@ -1,5 +1,7 @@
 <?php
 
+namespace APP\plugins\generic\journalPayment;
+
 /**
  * Small Google Drive v3 client for hosts where Composer/exec is unavailable.
  * Authentication uses an OAuth refresh token owned by the journal account.
@@ -64,7 +66,7 @@ class JournalPaymentGoogleDrive {
 	public function uploadFile($folderId, $name, $mime, $bytes) {
 		try {
 			$boundary = 'jpdrive-' . bin2hex(random_bytes(10));
-		} catch (Exception $e) {
+		} catch (\Exception $e) {
 			$boundary = 'jpdrive-' . str_replace('.', '', uniqid('', true));
 		}
 		$metadata = json_encode(array('name' => $name, 'parents' => array($folderId)));

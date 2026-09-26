@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.0.0 — 2026-09-26
+
+Rilis porting untuk **OJS 3.5.0-x**. Tidak kompatibel dengan OJS 3.3; gunakan 1.28.4 untuk OJS 3.3.
+
+- Seluruh class memakai namespace `APP\plugins\generic\journalPayment`, file `.inc.php` menjadi `.php`, dan `index.php` dihapus sesuai pemuatan plugin OJS 3.4+.
+- Handler halaman dikirim melalui argumen hook `LoadHandler`; `HANDLER_CLASS` (ditolak OJS 3.5) tidak lagi dipakai.
+- Mengganti fungsi global `fatalError()` dan `import()` yang telah dihapus.
+- Email konfirmasi, pengingat revisi, LOA/sertifikat, dan proofreading dikirim melalui `Mailable` OJS 3.5; status terkirim/gagal pada Audit dideteksi dari event `MessageSent` karena mailer OJS menyembunyikan galat SMTP.
+- Kode keputusan editorial disesuaikan dengan penomoran baru OJS 3.4+ (`PKP\decision\Decision`). Rekomendasi editor tidak lagi dianggap keputusan terbaru.
+- Volume, nomor, dan tahun terbit dibaca dari kolom `publications.issue_id` (sebelumnya `publication_settings.issueId`).
+- `UserDAO`, `StageAssignmentDAO`, dan `Services::get('submission')` diganti dengan `Repo::user()` dan `Repo::submission()`.
+- Pemanggilan URL dan redirect memakai argumen path bertipe array sesuai signature ketat OJS 3.5.
+- Pemeriksaan Site Administrator memakai `Application::SITE_CONTEXT_ID` (bernilai `null` di OJS 3.5).
+- Daftar Pengelola Pembayaran Akses Penuh hanya menampilkan keanggotaan peran yang masih aktif (`user_user_groups.date_end`).
+- `payment.css` dan `manage.js` pada tab Pengaturan Website didaftarkan melalui hook `TemplateManager::display` karena backend Vue 3 mengabaikan tag `<script>` di dalam tab.
+- Template memakai `PKP\core\PKPApplication::ROUTE_*` sehingga tetap berjalan pada mode `strict = On`; modifier `number_format` dan `nl2br` didaftarkan eksplisit untuk Smarty 4.
+- Folder bahasa `en_US`/`id_ID` menjadi `en`/`id`; lapisan cadangan terjemahan untuk cache locale OJS 3.3 dihapus.
+- Migrasi memakai facade `Schema`/`DB`; nama tabel dan kolom tidak berubah sehingga data 1.x tetap terbaca.
+
 ## 1.28.4 — 2026-09-14
 
 - Memperbaiki galat SQL 500 ketika akun editor membuka tab Pembayaran.

@@ -1,28 +1,29 @@
 <?php
 
 /**
- * @file controllers/JournalPaymentDashboardHandler.inc.php
+ * @file controllers/JournalPaymentDashboardHandler.php
  * @brief AJAX component for the Website Settings payment tab.
  */
 
-import('classes.handler.Handler');
-import('lib.pkp.classes.core.JSONMessage');
+namespace APP\plugins\generic\journalPayment\controllers;
+
+use APP\handler\Handler;
+use APP\plugins\generic\journalPayment\JournalPaymentHandler;
+use PKP\core\JSONMessage;
+use PKP\security\authorization\ContextAccessPolicy;
+use PKP\security\Role;
 
 class JournalPaymentDashboardHandler extends Handler {
-	/** @var JournalPaymentPlugin */
+	/** @var \APP\plugins\generic\journalPayment\JournalPaymentPlugin */
 	private static $plugin;
 
-	public static function setPlugin($plugin) {
-		self::$plugin = $plugin;
-	}
-
-	public function __construct() {
+	public function __construct($plugin = null) {
 		parent::__construct();
-		$this->addRoleAssignment(array(ROLE_ID_MANAGER, ROLE_ID_SUB_EDITOR, ROLE_ID_ASSISTANT), array('index', 'fetch'));
+		if ($plugin) self::$plugin = $plugin;
+		$this->addRoleAssignment(array(Role::ROLE_ID_MANAGER, Role::ROLE_ID_SUB_EDITOR, Role::ROLE_ID_ASSISTANT), array('index', 'fetch'));
 	}
 
 	public function authorize($request, &$args, $roleAssignments) {
-		import('lib.pkp.classes.security.authorization.ContextAccessPolicy');
 		$this->addPolicy(new ContextAccessPolicy($request, $roleAssignments));
 		return parent::authorize($request, $args, $roleAssignments);
 	}
@@ -37,9 +38,7 @@ class JournalPaymentDashboardHandler extends Handler {
 		if (!$context || !self::$plugin->getEnabled($context->getId())) {
 			return new JSONMessage(false, 'Plugin Pembayaran tidak aktif pada jurnal ini.');
 		}
-		self::$plugin->import('JournalPaymentHandler');
-		JournalPaymentHandler::setPlugin(self::$plugin);
-		$handler = new JournalPaymentHandler();
+		$handler = new JournalPaymentHandler(self::$plugin);
 		return $handler->fetchManageContent($args, $request);
 	}
 }

@@ -1,12 +1,19 @@
 <?php
 
+/**
+ * @file JournalPaymentSchemaMigration.php
+ * @brief Idempotent schema for Journal Payment (OJS 3.5).
+ */
+
+namespace APP\plugins\generic\journalPayment;
+
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
-use Illuminate\Database\Capsule\Manager as Capsule;
+use Illuminate\Support\Facades\Schema;
 
 class JournalPaymentSchemaMigration extends Migration {
 	public function up() {
-		if (Capsule::schema()->hasTable('journal_payment_records')) {
+		if (Schema::hasTable('journal_payment_records')) {
 			$this->addDocumentColumns();
 			$this->addFinanceColumns();
 			$this->addSecurityColumns();
@@ -19,7 +26,7 @@ class JournalPaymentSchemaMigration extends Migration {
 			$this->createProtectedDocumentTable();
 			return;
 		}
-		Capsule::schema()->create('journal_payment_records', function (Blueprint $table) {
+		Schema::create('journal_payment_records', function (Blueprint $table) {
 			$table->bigIncrements('payment_id');
 			$table->bigInteger('context_id');
 			$table->string('tracking_code', 40)->unique();
@@ -59,7 +66,7 @@ class JournalPaymentSchemaMigration extends Migration {
 	}
 
 	private function addDocumentColumns() {
-		$schema = Capsule::schema();
+		$schema = Schema::getFacadeRoot();
 		if (!$schema->hasColumn('journal_payment_records', 'publication_date')) {
 			$schema->table('journal_payment_records', function (Blueprint $table) { $table->date('publication_date')->nullable(); });
 		}
@@ -88,7 +95,7 @@ class JournalPaymentSchemaMigration extends Migration {
 
 	/** Freeze the handler and issue used by finance once a published article is recognized. */
 	private function addFinanceColumns() {
-		$schema = Capsule::schema();
+		$schema = Schema::getFacadeRoot();
 		if (!$schema->hasColumn('journal_payment_records', 'finance_editor_id')) {
 			$schema->table('journal_payment_records', function (Blueprint $table) { $table->bigInteger('finance_editor_id')->nullable(); });
 		}
@@ -111,7 +118,7 @@ class JournalPaymentSchemaMigration extends Migration {
 
 	/** One permanent high-entropy token protects every public document for a payment. */
 	private function addSecurityColumns() {
-		$schema = Capsule::schema();
+		$schema = Schema::getFacadeRoot();
 		if (!$schema->hasColumn('journal_payment_records', 'document_access_token')) {
 			$schema->table('journal_payment_records', function (Blueprint $table) {
 				$table->string('document_access_token', 64)->nullable();
@@ -122,8 +129,8 @@ class JournalPaymentSchemaMigration extends Migration {
 
 	/** Immutable encrypted document versions; only one active row per type/payment. */
 	private function createProtectedDocumentTable() {
-		if (Capsule::schema()->hasTable('journal_payment_documents')) return;
-		Capsule::schema()->create('journal_payment_documents', function (Blueprint $table) {
+		if (Schema::hasTable('journal_payment_documents')) return;
+		Schema::create('journal_payment_documents', function (Blueprint $table) {
 			$table->bigIncrements('document_id');
 			$table->bigInteger('context_id');
 			$table->bigInteger('payment_id');
@@ -149,8 +156,8 @@ class JournalPaymentSchemaMigration extends Migration {
 
 	/** Multiple deposits are allowed because an issue can receive published articles gradually. */
 	private function createRemittanceTable() {
-		if (Capsule::schema()->hasTable('journal_payment_remittances')) return;
-		Capsule::schema()->create('journal_payment_remittances', function (Blueprint $table) {
+		if (Schema::hasTable('journal_payment_remittances')) return;
+		Schema::create('journal_payment_remittances', function (Blueprint $table) {
 			$table->bigIncrements('remittance_id');
 			$table->bigInteger('context_id');
 			$table->bigInteger('editor_user_id');
@@ -173,8 +180,8 @@ class JournalPaymentSchemaMigration extends Migration {
 	}
 
 	private function createAuditTable() {
-		if (Capsule::schema()->hasTable('journal_payment_audit_logs')) return;
-		Capsule::schema()->create('journal_payment_audit_logs', function (Blueprint $table) {
+		if (Schema::hasTable('journal_payment_audit_logs')) return;
+		Schema::create('journal_payment_audit_logs', function (Blueprint $table) {
 			$table->bigIncrements('audit_id');
 			$table->bigInteger('context_id');
 			$table->bigInteger('actor_user_id')->nullable();
@@ -193,8 +200,8 @@ class JournalPaymentSchemaMigration extends Migration {
 	}
 
 	private function createEmailLogTable() {
-		if (Capsule::schema()->hasTable('journal_payment_email_logs')) return;
-		Capsule::schema()->create('journal_payment_email_logs', function (Blueprint $table) {
+		if (Schema::hasTable('journal_payment_email_logs')) return;
+		Schema::create('journal_payment_email_logs', function (Blueprint $table) {
 			$table->bigIncrements('email_log_id');
 			$table->bigInteger('context_id');
 			$table->bigInteger('payment_id')->nullable();
@@ -212,8 +219,8 @@ class JournalPaymentSchemaMigration extends Migration {
 	}
 
 	private function createRateLimitTable() {
-		if (Capsule::schema()->hasTable('journal_payment_rate_limits')) return;
-		Capsule::schema()->create('journal_payment_rate_limits', function (Blueprint $table) {
+		if (Schema::hasTable('journal_payment_rate_limits')) return;
+		Schema::create('journal_payment_rate_limits', function (Blueprint $table) {
 			$table->bigIncrements('rate_limit_id');
 			$table->bigInteger('context_id');
 			$table->string('scope', 40);
@@ -229,8 +236,8 @@ class JournalPaymentSchemaMigration extends Migration {
 
 	/** Keep every uploaded final proof as an immutable version with one author decision. */
 	private function createProofreadingTable() {
-		if (Capsule::schema()->hasTable('journal_payment_proofs')) return;
-		Capsule::schema()->create('journal_payment_proofs', function (Blueprint $table) {
+		if (Schema::hasTable('journal_payment_proofs')) return;
+		Schema::create('journal_payment_proofs', function (Blueprint $table) {
 			$table->bigIncrements('proof_id');
 			$table->bigInteger('context_id');
 			$table->bigInteger('payment_id');
@@ -258,8 +265,8 @@ class JournalPaymentSchemaMigration extends Migration {
 
 	/** Snapshot every OJS Production Editor assignment and its payout history. */
 	private function createProductionFeeTables() {
-		if (!Capsule::schema()->hasTable('journal_payment_production_fees')) {
-			Capsule::schema()->create('journal_payment_production_fees', function (Blueprint $table) {
+		if (!Schema::hasTable('journal_payment_production_fees')) {
+			Schema::create('journal_payment_production_fees', function (Blueprint $table) {
 				$table->bigIncrements('production_fee_id');
 				$table->bigInteger('context_id');
 				$table->bigInteger('payment_id');
@@ -275,8 +282,8 @@ class JournalPaymentSchemaMigration extends Migration {
 				$table->index(array('context_id', 'article_id'), 'jp_prod_fee_context_article');
 			});
 		}
-		if (!Capsule::schema()->hasTable('journal_payment_production_payouts')) {
-			Capsule::schema()->create('journal_payment_production_payouts', function (Blueprint $table) {
+		if (!Schema::hasTable('journal_payment_production_payouts')) {
+			Schema::create('journal_payment_production_payouts', function (Blueprint $table) {
 				$table->bigIncrements('production_payout_id');
 				$table->bigInteger('context_id');
 				$table->bigInteger('production_editor_user_id');
@@ -296,5 +303,9 @@ class JournalPaymentSchemaMigration extends Migration {
 				$table->index(array('context_id', 'status'), 'jp_prod_pay_context_status');
 			});
 		}
+	}
+
+	/** Data is intentionally kept when the plugin is removed. */
+	public function down() {
 	}
 }

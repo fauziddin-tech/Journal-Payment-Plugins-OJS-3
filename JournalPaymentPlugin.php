@@ -1,42 +1,43 @@
 <?php
 
 /**
- * @file JournalPaymentPlugin.inc.php
+ * @file JournalPaymentPlugin.php
  *
  * @class JournalPaymentPlugin
- * @brief Manual publication-payment management for OJS 3.3.
+ * @brief Manual publication-payment management for OJS 3.5.
  */
 
-import('lib.pkp.classes.plugins.GenericPlugin');
+namespace APP\plugins\generic\journalPayment;
+
+use APP\core\Application;
+use APP\template\TemplateManager;
+use APP\plugins\generic\journalPayment\controllers\JournalPaymentDashboardHandler;
+use PKP\config\Config;
+use PKP\core\JSONMessage;
+use PKP\linkAction\LinkAction;
+use PKP\linkAction\request\AjaxModal;
+use PKP\linkAction\request\RedirectAction;
+use PKP\plugins\GenericPlugin;
+use PKP\plugins\Hook;
+use PKP\security\Role;
 
 class JournalPaymentPlugin extends GenericPlugin {
-	const ASSET_VERSION = '1.28.4';
+	const ASSET_VERSION = '2.0.0';
 
-	// Preserve the existing plugin-settings identity across the class rename.
+	/** Preserve the plugin-settings identity used by every 1.x release. */
 	public function getName() {
 		return 'journalpaymentplugin';
 	}
 
 	public function register($category, $path, $mainContextId = null) {
 		$success = parent::register($category, $path, $mainContextId);
+		// Locale files in locale/<code>/locale.po are registered by LazyLoadPlugin.
+		// The page hook is always registered; handleRequest() checks the journal state.
 		if ($success) {
-			// OJS file-based locale caches can remain stale after a plugin upgrade.
-			// Supply this plugin's strings directly when OJS reports a missing key.
-			HookRegistry::register('PKPLocale::translate', array($this, 'provideMissingTranslation'));
-		}
-		// Register the current locale explicitly. Some OJS 3.3 installations use
-		// a non-standard locale code (for example "en" instead of "en_US").
-		// getLocaleFilename() below provides a safe fallback for those systems.
-		if ($success) {
-			$this->addLocaleData(AppLocale::getLocale());
-		}
-		// Always register the page hook after the plugin class loads. OJS may call
-		// register() without a context id immediately after an application upgrade.
-		// The actual journal-enabled state is checked in handleRequest().
-		if ($success) {
-			HookRegistry::register('LoadHandler', array($this, 'handleRequest'));
-			HookRegistry::register('LoadComponentHandler', array($this, 'setupDashboardHandler'));
-			HookRegistry::register('Template::Settings::website', array($this, 'showWebsiteSettingsTab'));
+			Hook::add('LoadHandler', $this->handleRequest(...));
+			Hook::add('LoadComponentHandler', $this->setupDashboardHandler(...));
+			Hook::add('Template::Settings::website', $this->showWebsiteSettingsTab(...));
+			Hook::add('TemplateManager::display', $this->addBackendAssets(...));
 		}
 		return $success;
 	}
@@ -69,78 +70,39 @@ class JournalPaymentPlugin extends GenericPlugin {
 	/** Site administrators are always trusted; journal users require explicit selection. */
 	public function userHasFullPaymentAccess($user, $contextId) {
 		if (!$user) return false;
-		if ($user->hasRole(array(ROLE_ID_SITE_ADMIN), CONTEXT_SITE)) return true;
+		if ($user->hasRole(array(Role::ROLE_ID_SITE_ADMIN), Application::SITE_CONTEXT_ID)) return true;
 		$userId = (int) $user->getId();
 		if (!in_array($userId, $this->getFullPaymentManagerIds($contextId), true)) return false;
-		return $user->hasRole(array(ROLE_ID_MANAGER, ROLE_ID_SUB_EDITOR), (int) $contextId);
+		return $user->hasRole(array(Role::ROLE_ID_MANAGER, Role::ROLE_ID_SUB_EDITOR), (int) $contextId);
 	}
 
 	/**
-	 * Resolve locale files robustly on OJS installations that use a short or
-	 * custom English/Indonesian locale code.
+	 * Smarty 4 in OJS 3.5 only whitelists some PHP functions as modifiers.
+	 * Register the two used by the payment templates explicitly.
 	 */
-	public function getLocaleFilename($locale) {
-		$locale = preg_replace('/[^A-Za-z0-9_@.-]/', '', (string) $locale);
-		$candidates = array($locale);
-		if (stripos($locale, 'id') === 0 || stripos($locale, 'in') === 0) {
-			$candidates[] = 'id_ID';
-		}
-		if (stripos($locale, 'en') === 0) {
-			$candidates[] = 'en_US';
-		}
-		$candidates[] = 'en_US';
-		foreach (array_unique($candidates) as $candidate) {
-			$file = $this->getPluginPath() . '/locale/' . $candidate . '/locale.po';
-			if (file_exists($file)) return array($file);
-		}
-		return array();
-	}
-
-	/**
-	 * Bypass stale locale caches for this plugin only. Other plugins and core
-	 * translations continue through the normal OJS translation pipeline.
-	 */
-	public function provideMissingTranslation($hookName, $args) {
-		$key =& $args[0];
-		$params =& $args[1];
-		$locale =& $args[2];
-		$value =& $args[4];
-		if (strpos($key, 'plugins.generic.journalPayment.') !== 0) return false;
-
-		static $catalogues = array();
-		$files = $this->getLocaleFilename($locale);
-		foreach ($files as $file) {
-			if (!isset($catalogues[$file])) {
-				$catalogues[$file] = LocaleFile::load($file);
+	public static function registerTemplateModifiers($templateMgr) {
+		foreach (array('number_format', 'nl2br') as $modifier) {
+			if (empty($templateMgr->registered_plugins['modifier'][$modifier])) {
+				$templateMgr->registerPlugin('modifier', $modifier, $modifier);
 			}
-			if (!isset($catalogues[$file][$key])) continue;
-			$value = $catalogues[$file][$key];
-			foreach ((array) $params as $paramName => $paramValue) {
-				$value = str_replace('{$' . $paramName . '}', $paramValue === null ? '' : $paramValue, $value);
-			}
-			return true;
 		}
-		return false;
 	}
 
 	public function getInstallMigration() {
-		$this->import('JournalPaymentSchemaMigration');
 		return new JournalPaymentSchemaMigration();
 	}
 
+	/**
+	 * OJS 3.5 no longer accepts HANDLER_CLASS; the handler instance is passed
+	 * back through the fourth LoadHandler argument.
+	 */
 	public function handleRequest($hookName, $args) {
-		$page =& $args[0];
-		$request = Application::get()->getRequest();
-		$context = $request->getContext();
-		if ($page !== 'journalPayment') {
-			return false;
-		}
-		if (!$context || !$this->getEnabled($context->getId())) {
-			return false;
-		}
-		define('HANDLER_CLASS', 'JournalPaymentHandler');
-		$this->import('JournalPaymentHandler');
-		JournalPaymentHandler::setPlugin($this);
+		$page = $args[0];
+		$handler = &$args[3];
+		if ($page !== 'journalPayment') return false;
+		$context = Application::get()->getRequest()->getContext();
+		if (!$context || !$this->getEnabled($context->getId())) return false;
+		$handler = new JournalPaymentHandler($this);
 		return true;
 	}
 
@@ -153,10 +115,8 @@ class JournalPaymentPlugin extends GenericPlugin {
 		$context = $request->getContext();
 		if (!$context || !$this->getEnabled($context->getId())) return false;
 		$templateMgr = $args[1];
-		$output =& $args[2];
+		$output = &$args[2];
 		$templateMgr->assign(array(
-			'journalPaymentAssetUrl' => $this->getAssetUrl($request),
-			'journalPaymentAssetVersion' => $this->getAssetVersion(),
 			'journalPaymentDocumentMail' => trim((string) $request->getUserVar('documentMail')),
 			'journalPaymentRecordResult' => trim((string) $request->getUserVar('recordResult')),
 			'journalPaymentFilter' => trim((string) $request->getUserVar('filter')),
@@ -173,12 +133,30 @@ class JournalPaymentPlugin extends GenericPlugin {
 		return false;
 	}
 
+	/**
+	 * The Vue 3 backend ignores <script>/<style> tags inside tab templates, so
+	 * the dashboard assets are registered on the Website Settings page itself.
+	 */
+	public function addBackendAssets($hookName, $args) {
+		$templateMgr = $args[0];
+		$template = $args[1];
+		if (!is_string($template) || strpos($template, 'management/website') === false) return false;
+		$request = Application::get()->getRequest();
+		$context = $request->getContext();
+		if (!$context || !$this->getEnabled($context->getId())) return false;
+		$base = $this->getAssetUrl($request);
+		$version = $this->getAssetVersion();
+		$templateMgr->addStyleSheet('journalPaymentBackend', $base . '/styles/payment.css?v=' . $version, array('contexts' => array('backend')));
+		$templateMgr->addJavaScript('journalPaymentBackend', $base . '/js/manage.js?v=' . $version, array('contexts' => array('backend')));
+		return false;
+	}
+
 	/** Register the component that supplies the dashboard tab content. */
 	public function setupDashboardHandler($hookName, $args) {
-		$component =& $args[0];
+		$component = $args[0];
+		$componentInstance = &$args[2];
 		if ($component !== 'plugins.generic.journalPayment.controllers.JournalPaymentDashboardHandler') return false;
-		$this->import('controllers.JournalPaymentDashboardHandler');
-		JournalPaymentDashboardHandler::setPlugin($this);
+		$componentInstance = new JournalPaymentDashboardHandler($this);
 		return true;
 	}
 
@@ -192,18 +170,16 @@ class JournalPaymentPlugin extends GenericPlugin {
 
 		$router = $request->getRouter();
 		$dispatcher = $request->getDispatcher();
-		import('lib.pkp.classes.linkAction.request.AjaxModal');
-		import('lib.pkp.classes.linkAction.request.RedirectAction');
 
 		array_unshift($actions, new LinkAction(
 			'openDashboard',
 			new RedirectAction($dispatcher->url(
 				$request,
-				ROUTE_PAGE,
+				Application::ROUTE_PAGE,
 				null,
 				'management',
 				'settings',
-				'website',
+				array('website'),
 				array('uid' => uniqid()),
 				'journalPayment'
 			)),
@@ -232,7 +208,6 @@ class JournalPaymentPlugin extends GenericPlugin {
 			if (!$context || !$this->userHasFullPaymentAccess($request->getUser(), $context->getId())) {
 				return new JSONMessage(false, 'Hanya pengelola pembayaran berakses penuh yang dapat membuka pengaturan plugin.');
 			}
-			$this->import('JournalPaymentSettingsForm');
 			$form = new JournalPaymentSettingsForm($this);
 			if (!$request->getUserVar('save')) {
 				$form->initData();
@@ -259,7 +234,7 @@ class JournalPaymentPlugin extends GenericPlugin {
 		if ($fileName === '') return '';
 		$path = $this->getDocumentAssetDirectory($contextId) . DIRECTORY_SEPARATOR . $fileName;
 		if (!is_file($path) || filesize($path) > 2097152) return '';
-		$finfo = new finfo(FILEINFO_MIME_TYPE);
+		$finfo = new \finfo(FILEINFO_MIME_TYPE);
 		$mime = (string) $finfo->file($path);
 		if (!in_array($mime, array('image/png', 'image/jpeg', 'image/webp'), true)) return '';
 		$bytes = file_get_contents($path);
@@ -314,7 +289,7 @@ class JournalPaymentPlugin extends GenericPlugin {
 		if (!is_dir($directory) && !mkdir($directory, 0750, true) && !is_dir($directory)) return false;
 		try {
 			$token = bin2hex(random_bytes(12));
-		} catch (Exception $e) {
+		} catch (\Exception $e) {
 			$token = str_replace('.', '', uniqid('', true));
 		}
 		$fileName = strtolower($settingName) . '-' . $token . '.' . $extensions[$mime];
@@ -379,3 +354,18 @@ class JournalPaymentPlugin extends GenericPlugin {
 		return 60;
 	}
 }
+
+// Releases 1.0.3 through 1.0.13 stored version-specific class names in the
+// OJS versions table. Keep namespaced aliases so an upgraded installation
+// still passes PluginRegistry's class check before the versions row refreshes.
+foreach (array(
+	'JournalPaymentV103Plugin', 'JournalPaymentV104Plugin', 'JournalPaymentV105Plugin',
+	'JournalPaymentV106Plugin', 'JournalPaymentV107Plugin', 'JournalPaymentV108Plugin',
+	'JournalPaymentV109Plugin', 'JournalPaymentV110Plugin', 'JournalPaymentV111Plugin',
+	'JournalPaymentV112Plugin', 'JournalPaymentV113Plugin',
+) as $journalPaymentLegacyClass) {
+	if (!class_exists(__NAMESPACE__ . '\\' . $journalPaymentLegacyClass, false)) {
+		class_alias(JournalPaymentPlugin::class, __NAMESPACE__ . '\\' . $journalPaymentLegacyClass);
+	}
+}
+unset($journalPaymentLegacyClass);

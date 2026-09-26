@@ -1,5 +1,7 @@
 <?php
 
+namespace APP\plugins\generic\journalPayment;
+
 /**
  * Create protected, server-side PDFs with the TCPDF copy bundled by OJS/PKP.
  * No shell command, Composer install, or external PDF service is required.
@@ -26,7 +28,7 @@ class JournalPaymentPdfGenerator {
 		if (!class_exists('TCPDF', false)) return array('success' => false, 'error' => $this->getUnavailableMessage());
 
 		try {
-			$pdf = new TCPDF('P', 'mm', 'A4', true, 'UTF-8', false);
+			$pdf = new \TCPDF('P', 'mm', 'A4', true, 'UTF-8', false);
 			$pdf->SetCreator('OJS Journal Payment');
 			$pdf->SetAuthor($data['journalName']);
 			$pdf->SetTitle($data['documentTitle']);
@@ -48,18 +50,18 @@ class JournalPaymentPdfGenerator {
 			else $this->renderDocument($pdf, $data, $type === 'loa');
 			$pdf->Output($outputPath, 'F');
 			@chmod($outputPath, 0640);
-			if (!is_file($outputPath) || filesize($outputPath) < 500) throw new Exception('Berkas PDF tidak berhasil ditulis.');
+			if (!is_file($outputPath) || filesize($outputPath) < 500) throw new \Exception('Berkas PDF tidak berhasil ditulis.');
 			$check = @fopen($outputPath, 'rb');
 			$header = $check ? fread($check, 5) : '';
 			if ($check) fclose($check);
-			if ($header !== '%PDF-') throw new Exception('Keluaran generator bukan berkas PDF yang valid.');
+			if ($header !== '%PDF-') throw new \Exception('Keluaran generator bukan berkas PDF yang valid.');
 			return array(
 				'success' => true,
 				'sha256' => hash_file('sha256', $outputPath),
 				'byteSize' => filesize($outputPath),
 				'encryption' => 'AES-256; print-only',
 			);
-		} catch (Throwable $e) {
+		} catch (\Throwable $e) {
 			if (is_file($outputPath)) @unlink($outputPath);
 			return array('success' => false, 'error' => $e->getMessage());
 		}

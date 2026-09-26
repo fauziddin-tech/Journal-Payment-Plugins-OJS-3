@@ -88,7 +88,7 @@
 </style>
 
 <form class="pkp_form" id="journalPaymentSettings" method="POST"
-	action="{url router=$smarty.const.ROUTE_COMPONENT op="manage" category="generic" plugin=$pluginName verb="settings" save=true}">
+	action="{url router=PKP\core\PKPApplication::ROUTE_COMPONENT op="manage" category="generic" plugin=$pluginName verb="settings" save=true}">
 	{csrf}
 	{fbvFormArea id="journalPaymentSettingsArea"}
 		<div class="section formButtons" style="text-align:left;border:0;padding:0;margin:0">

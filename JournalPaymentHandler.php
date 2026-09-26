@@ -1,20 +1,41 @@
 <?php
 
 /**
- * @file JournalPaymentHandler.inc.php
+ * @file JournalPaymentHandler.php
  * @brief Public and manager routes for Journal Payment.
  */
 
-import('classes.handler.Handler');
+namespace APP\plugins\generic\journalPayment;
 
-use Illuminate\Database\Capsule\Manager as Capsule;
+use APP\core\Application;
+use APP\facades\Repo;
+use APP\handler\Handler;
+use APP\submission\Submission;
+use APP\template\TemplateManager;
+use DateTime;
+use Exception;
+use finfo;
+use Illuminate\Mail\Events\MessageSent;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Facades\Schema;
+use PKP\config\Config;
+use PKP\core\JSONMessage;
+use PKP\decision\Decision;
+use PKP\mail\Mailable;
+use PKP\security\Role;
+use PKP\security\Validation;
+use Throwable;
+use Traversable;
 
 class JournalPaymentHandler extends Handler {
 	/** @var JournalPaymentPlugin */
 	private static $plugin;
 
-	public static function setPlugin($plugin) {
-		self::$plugin = $plugin;
+	public function __construct($plugin = null) {
+		parent::__construct();
+		if ($plugin) self::$plugin = $plugin;
 	}
 
 	public function index($args, $request) {
@@ -94,12 +115,12 @@ class JournalPaymentHandler extends Handler {
 					} else {
 						$transactionStarted = false;
 						try {
-							$connection = Capsule::connection();
+							$connection = DB::connection();
 							$connection->beginTransaction();
 							$transactionStarted = true;
 							// Serialize submissions for the same article so two requests arriving
 							// together can not both pass the duplicate check.
-							Capsule::table('submissions')
+							DB::table('submissions')
 								->where('submission_id', (int) $values['articleId'])
 								->lockForUpdate()
 								->first();
@@ -112,7 +133,7 @@ class JournalPaymentHandler extends Handler {
 								$createdAt = date('Y-m-d H:i:s');
 								$publicationDate = date('Y-m-d', strtotime('+' . (int) $selectedPackage['duration_days'] . ' days', strtotime($createdAt)));
 								$documentAccessToken = $this->newDocumentAccessToken();
-								$paymentId = Capsule::table('journal_payment_records')->insertGetId(array(
+								$paymentId = DB::table('journal_payment_records')->insertGetId(array(
 									'context_id' => $contextId,
 									'tracking_code' => $trackingCode,
 									'document_access_token' => $documentAccessToken,
@@ -166,7 +187,7 @@ class JournalPaymentHandler extends Handler {
 								return;
 							}
 						} catch (Exception $e) {
-							if ($transactionStarted) Capsule::connection()->rollBack();
+							if ($transactionStarted) DB::connection()->rollBack();
 							@unlink($stored['path']);
 							$errors[] = 'Data pembayaran belum dapat disimpan. Silakan coba kembali.';
 						}
@@ -249,7 +270,7 @@ class JournalPaymentHandler extends Handler {
 		if ($searched && !$this->allowPublicSearch($request, $context->getId(), 'status_search', 40, 600)) {
 			$rateLimited = true;
 		} elseif ($articleId !== '' && ctype_digit($articleId) && strlen($articleId) <= 20) {
-			$record = Capsule::table('journal_payment_records')
+			$record = DB::table('journal_payment_records')
 				->where('context_id', $context->getId())
 				->where('article_id', $articleId)
 				->orderBy('created_at', 'desc')
@@ -270,7 +291,7 @@ class JournalPaymentHandler extends Handler {
 			$record->proofreading = $this->latestProofForPayment($context->getId(), (int) $record->payment_id);
 			$record->proofreading_status_label = $this->proofreadingStatusLabel($record->proofreading ? $record->proofreading->status : 'not_uploaded');
 			$record->proofreading_url = ($record->proofreading && $record->document_access_granted)
-				? $request->getDispatcher()->url($request, ROUTE_PAGE, $context->getPath(), 'journalPayment', 'proofreading', null, array('access' => $record->proofreading->access_token)) : '';
+				? $request->getDispatcher()->url($request, Application::ROUTE_PAGE, $context->getPath(), 'journalPayment', 'proofreading', null, array('access' => $record->proofreading->access_token)) : '';
 			$urgencyData = $this->urgencyForRecord($record, $editorialStatus['key'], $context->getId());
 			$record->urgency_key = $urgencyData['key'];
 			$record->urgency_label = $urgencyData['label'];
@@ -303,7 +324,7 @@ class JournalPaymentHandler extends Handler {
 		if ($searched && !$this->allowPublicSearch($request, $context->getId(), 'document_search', 30, 600)) {
 			$rateLimited = true;
 		} elseif ($articleId !== '' && ctype_digit($articleId) && strlen($articleId) <= 20) {
-			$record = Capsule::table('journal_payment_records')
+			$record = DB::table('journal_payment_records')
 				->where('context_id', $context->getId())
 				->where('article_id', $articleId)
 				->where('status', 'verified')
@@ -333,7 +354,7 @@ class JournalPaymentHandler extends Handler {
 		$code = strtoupper(trim((string) $request->getUserVar('code')));
 		$email = strtolower(trim((string) $request->getUserVar('email')));
 		$accessToken = trim((string) $request->getUserVar('access'));
-		$query = Capsule::table('journal_payment_records')
+		$query = DB::table('journal_payment_records')
 			->where('context_id', $context->getId())
 			->where('status', 'verified');
 		if ($articleId !== '' && ctype_digit($articleId) && strlen($articleId) <= 20) {
@@ -347,10 +368,10 @@ class JournalPaymentHandler extends Handler {
 		$legacyAccess = $code !== '' && $email !== '' && $record && hash_equals((string) $record->tracking_code, $code) && hash_equals(strtolower((string) $record->payer_email), $email);
 		if (!$record || (!$legacyAccess && !$this->documentAccessAllowed($request, $context->getId(), $record, $accessToken))) {
 			http_response_code(404);
-			fatalError('Data pembayaran tidak ditemukan.');
+			$this->fail('Data pembayaran tidak ditemukan.');
 		}
 		$document = $this->ensureProtectedDocument($request, $context, $record, 'receipt');
-		if (!$document['success']) { http_response_code(503); fatalError($document['error']); }
+		if (!$document['success']) { http_response_code(503); $this->fail($document['error']); }
 		$this->streamProtectedDocument($document['row'], $request);
 	}
 
@@ -359,7 +380,7 @@ class JournalPaymentHandler extends Handler {
 		$contextId = $context->getId();
 		$currentUser = $request->getUser();
 		if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-			if (!$request->checkCSRF()) fatalError('Sesi formulir tidak valid. Muat ulang halaman lalu coba kembali.');
+			if (!$request->checkCSRF()) $this->fail('Sesi formulir tidak valid. Muat ulang halaman lalu coba kembali.');
 			$productionAction = trim((string) $request->getUserVar('productionAction'));
 			if ($productionAction !== '') {
 				$this->handleProductionFeeAction($request, $context, $productionAction);
@@ -367,13 +388,13 @@ class JournalPaymentHandler extends Handler {
 			}
 			$financeAction = trim((string) $request->getUserVar('financeAction'));
 			if ($financeAction !== '') {
-				if (!$this->canManagePaymentRecords($currentUser, $contextId)) fatalError('Tindakan keuangan tidak diizinkan.');
+				if (!$this->canManagePaymentRecords($currentUser, $contextId)) $this->fail('Tindakan keuangan tidak diizinkan.');
 				$this->handleFinanceAction($request, $context, $financeAction);
 				return;
 			}
 			$driveAction = trim((string) $request->getUserVar('driveAction'));
 			if ($driveAction !== '') {
-				if (!$this->isFullPaymentManager($currentUser, $contextId)) fatalError('Hanya pengelola pembayaran berakses penuh yang dapat mengelola Folder GD.');
+				if (!$this->isFullPaymentManager($currentUser, $contextId)) $this->fail('Hanya pengelola pembayaran berakses penuh yang dapat mengelola Folder GD.');
 				$this->handleGoogleDriveAction($request, $context, $driveAction);
 				return;
 			}
@@ -382,7 +403,7 @@ class JournalPaymentHandler extends Handler {
 				$this->handleProofreadingAction($request, $context, $proofreadingAction);
 				return;
 			}
-			if (!$this->canManagePaymentRecords($currentUser, $contextId)) fatalError('Production Editor tidak memiliki hak untuk mengubah pembayaran penulis.');
+			if (!$this->canManagePaymentRecords($currentUser, $contextId)) $this->fail('Production Editor tidak memiliki hak untuk mengubah pembayaran penulis.');
 			$id = (int) $request->getUserVar('paymentId');
 			$recordAction = trim((string) $request->getUserVar('recordAction'));
 			$status = trim((string) $request->getUserVar('newStatus'));
@@ -416,7 +437,7 @@ class JournalPaymentHandler extends Handler {
 				}
 				$currentStatusMap = $this->getEditorialStatusMap($contextId, array((int) $record->article_id));
 				$currentStatusKey = isset($currentStatusMap[(int) $record->article_id]) ? $currentStatusMap[(int) $record->article_id]['key'] : 'unknown';
-				Capsule::table('journal_payment_records')->where('context_id', $contextId)->where('payment_id', $id)->update(array(
+				DB::table('journal_payment_records')->where('context_id', $contextId)->where('payment_id', $id)->update(array(
 					'payer_name' => mb_substr($name, 0, 255),
 					'payer_email' => mb_substr($email, 0, 255),
 					'payer_phone' => $phone,
@@ -453,10 +474,10 @@ class JournalPaymentHandler extends Handler {
 					return;
 				}
 				$proofPath = $this->uploadDirectory($contextId) . DIRECTORY_SEPARATOR . basename((string) $record->proof_file);
-				$documentRows = Capsule::table('journal_payment_documents')->where('context_id', $contextId)->where('payment_id', $id)->get();
+				$documentRows = DB::table('journal_payment_documents')->where('context_id', $contextId)->where('payment_id', $id)->get();
 				$this->auditLog($contextId, $request, 'payment_deleted', 'payment', $id, $record->article_id, $this->paymentAuditValues($record), null, 'Data pembayaran dihapus.');
-				Capsule::table('journal_payment_records')->where('context_id', $contextId)->where('payment_id', $id)->delete();
-				Capsule::table('journal_payment_documents')->where('context_id', $contextId)->where('payment_id', $id)->delete();
+				DB::table('journal_payment_records')->where('context_id', $contextId)->where('payment_id', $id)->delete();
+				DB::table('journal_payment_documents')->where('context_id', $contextId)->where('payment_id', $id)->delete();
 				$this->saveIssueMetadata($contextId, $id, array());
 				if (is_file($proofPath)) @unlink($proofPath);
 				foreach ($documentRows as $documentRow) {
@@ -499,7 +520,7 @@ class JournalPaymentHandler extends Handler {
 					$column = $documentAction === 'issueLoa' ? 'loa' : 'certificate';
 					$contextPath = preg_replace('/[^A-Za-z0-9]/', '', strtoupper((string) $context->getPath()));
 					if ($contextPath === '') $contextPath = 'JOURNAL';
-					Capsule::table('journal_payment_records')->where('context_id', $contextId)->where('payment_id', $id)->update(array(
+					DB::table('journal_payment_records')->where('context_id', $contextId)->where('payment_id', $id)->update(array(
 						$column . '_no' => $prefix . '/' . $contextPath . '/' . date('Y') . '/' . str_pad($id, 6, '0', STR_PAD_LEFT),
 						$column . '_issued_at' => date('Y-m-d H:i:s'),
 						$column . '_issued_by' => $request->getUser()->getId(),
@@ -543,7 +564,7 @@ class JournalPaymentHandler extends Handler {
 						$data['verified_by'] = null;
 						$this->revokeProtectedDocuments($contextId, $id, $request, null, 'Status pembayaran tidak lagi terverifikasi.');
 					}
-					Capsule::table('journal_payment_records')->where('context_id', $contextId)->where('payment_id', $id)->update($data);
+					DB::table('journal_payment_records')->where('context_id', $contextId)->where('payment_id', $id)->update($data);
 					$this->auditLog($contextId, $request, 'payment_status_changed', 'payment', $id, $record->article_id,
 						array('status' => $oldStatus, 'manager_notes' => isset($record->manager_notes) ? $record->manager_notes : null),
 						array('status' => $status, 'manager_notes' => array_key_exists('manager_notes', $data) ? $data['manager_notes'] : (isset($record->manager_notes) ? $record->manager_notes : null))
@@ -564,6 +585,7 @@ class JournalPaymentHandler extends Handler {
 	public function fetchManageContent($args, $request) {
 		$context = $this->requirePaymentStaff($request);
 		$templateMgr = TemplateManager::getManager($request);
+		JournalPaymentPlugin::registerTemplateModifiers($templateMgr);
 		$resultsOnly = (bool) $request->getUserVar('resultsOnly');
 		$this->assignManageData($request, $context, $templateMgr, $resultsOnly);
 		$templateMgr->assign(array(
@@ -611,7 +633,7 @@ class JournalPaymentHandler extends Handler {
 		$q = trim((string) $request->getUserVar('q'));
 		$page = max(1, (int) $request->getUserVar('p'));
 		$perPage = 25;
-		$baseQuery = Capsule::table('journal_payment_records')->where('context_id', $contextId);
+		$baseQuery = DB::table('journal_payment_records')->where('context_id', $contextId);
 		if ($accessibleSubmissionIds !== null) $baseQuery->whereIn('article_id', $accessibleSubmissionIds ?: array('0'));
 		$allArticleIds = array();
 		foreach ((clone $baseQuery)->select('article_id')->distinct()->get() as $candidate) {
@@ -717,26 +739,26 @@ class JournalPaymentHandler extends Handler {
 			$record->assigned_editor_label = isset($assignedEditorLabels[(int) $record->article_id])
 				? $assignedEditorLabels[(int) $record->article_id]
 				: 'Belum ditugaskan';
-			$record->workflow_url = $dispatcher->url($request, ROUTE_PAGE, $context->getPath(), 'workflow', 'access', array((int) $record->article_id));
+			$record->workflow_url = $dispatcher->url($request, Application::ROUTE_PAGE, $context->getPath(), 'workflow', 'access', array((int) $record->article_id));
 			$waPhone = $this->normalizeWhatsApp((string) $record->payer_phone);
 			$record->wa_link = $waPhone ? 'https://wa.me/' . $waPhone : '';
 			$record->loa_send_link = '';
 			$record->certificate_send_link = '';
 			if ($waPhone && !empty($record->loa_issued_at)) {
-				$loaUrl = $dispatcher->url($request, ROUTE_PAGE, $context->getPath(), 'journalPayment', 'loa', null, array('articleId' => $record->article_id, 'access' => $record->document_access_token));
+				$loaUrl = $dispatcher->url($request, Application::ROUTE_PAGE, $context->getPath(), 'journalPayment', 'loa', null, array('articleId' => $record->article_id, 'access' => $record->document_access_token));
 				$loaMessage = 'Yth. ' . $record->payer_name . ",\n\nLOA untuk artikel ID " . $record->article_id . ' telah diterbitkan. Silakan buka atau simpan dokumen melalui tautan resmi berikut:' . "\n" . $loaUrl . "\n\n" . $context->getLocalizedName();
 				$record->loa_send_link = 'https://wa.me/' . $waPhone . '?text=' . rawurlencode($loaMessage);
 			}
 			if ($waPhone && !empty($record->certificate_issued_at)) {
-				$certificateUrl = $dispatcher->url($request, ROUTE_PAGE, $context->getPath(), 'journalPayment', 'certificate', null, array('articleId' => $record->article_id, 'access' => $record->document_access_token));
+				$certificateUrl = $dispatcher->url($request, Application::ROUTE_PAGE, $context->getPath(), 'journalPayment', 'certificate', null, array('articleId' => $record->article_id, 'access' => $record->document_access_token));
 				$certificateMessage = 'Yth. ' . $record->payer_name . ",\n\nSertifikat Publikasi untuk artikel ID " . $record->article_id . ' telah diterbitkan. Silakan buka atau simpan dokumen melalui tautan resmi berikut:' . "\n" . $certificateUrl . "\n\n" . $context->getLocalizedName();
 				$record->certificate_send_link = 'https://wa.me/' . $waPhone . '?text=' . rawurlencode($certificateMessage);
 			}
 			$record->is_published = $record->editorial_status_key === 'published';
 			$record->proofreading = isset($proofsByPayment[(int) $record->payment_id]) ? $proofsByPayment[(int) $record->payment_id] : null;
 			$record->proofreading_status_label = $this->proofreadingStatusLabel($record->proofreading ? $record->proofreading->status : 'not_uploaded');
-			$record->proofreading_url = $record->proofreading ? $dispatcher->url($request, ROUTE_PAGE, $context->getPath(), 'journalPayment', 'proofreading', null, array('access' => $record->proofreading->access_token)) : '';
-			$record->proofreading_file_url = $record->proofreading ? $dispatcher->url($request, ROUTE_PAGE, $context->getPath(), 'journalPayment', 'proofreadingFile', null, array('id' => $record->proofreading->proof_id)) : '';
+			$record->proofreading_url = $record->proofreading ? $dispatcher->url($request, Application::ROUTE_PAGE, $context->getPath(), 'journalPayment', 'proofreading', null, array('access' => $record->proofreading->access_token)) : '';
+			$record->proofreading_file_url = $record->proofreading ? $dispatcher->url($request, Application::ROUTE_PAGE, $context->getPath(), 'journalPayment', 'proofreadingFile', null, array('id' => $record->proofreading->proof_id)) : '';
 			$record->proofreading_wa_link = '';
 			if ($waPhone && $record->proofreading) {
 				$proofMessage = 'Yth. ' . $record->payer_name . ",\n\nGalley akhir artikel ID " . $record->article_id . ' versi ' . $record->proofreading->version_number . " siap diperiksa. Silakan setujui atau ajukan koreksi melalui tautan resmi berikut:\n" . $record->proofreading_url . "\n\n" . $context->getLocalizedName();
@@ -753,7 +775,7 @@ class JournalPaymentHandler extends Handler {
 					'verified_total' => 0,
 				);
 			}
-			$packageQuery = Capsule::table('journal_payment_records')
+			$packageQuery = DB::table('journal_payment_records')
 				->where('context_id', $contextId)
 				->select('package_name')
 				->selectRaw('COUNT(*) AS submission_count')
@@ -771,11 +793,11 @@ class JournalPaymentHandler extends Handler {
 			}
 		}
 		$settingsUrl = function ($params = array()) use ($dispatcher, $request) {
-			return $dispatcher->url($request, ROUTE_PAGE, null, 'management', 'settings', 'website', $params, 'journalPayment');
+			return $dispatcher->url($request, Application::ROUTE_PAGE, null, 'management', 'settings', array('website'), $params, 'journalPayment');
 		};
 		$fetchUrl = $dispatcher->url(
 			$request,
-			ROUTE_COMPONENT,
+			Application::ROUTE_COMPONENT,
 			null,
 			'plugins.generic.journalPayment.controllers.JournalPaymentDashboardHandler',
 			'fetch'
@@ -859,7 +881,6 @@ class JournalPaymentHandler extends Handler {
 		$data = array();
 		$rootId = $this->googleDriveRootFolderId($contextId);
 		if ($rootId === '') return array('driveError' => 'root');
-		self::$plugin->import('JournalPaymentGoogleDrive');
 		$drive = new JournalPaymentGoogleDrive(self::$plugin, $contextId);
 		if (!$drive->isConfigured()) return array('driveError' => 'credentials');
 		$rootMeta = $drive->getMetadata($rootId);
@@ -946,7 +967,6 @@ class JournalPaymentHandler extends Handler {
 			$this->redirectManagerDashboard($request, $params);
 			return;
 		}
-		self::$plugin->import('JournalPaymentGoogleDrive');
 		$drive = new JournalPaymentGoogleDrive(self::$plugin, $contextId);
 		if (!$this->validDriveId($folderId) || !$this->driveFolderAllowed($drive, $rootId, $folderId)) {
 			$params['driveResult'] = 'invalidFolder';
@@ -1056,10 +1076,10 @@ class JournalPaymentHandler extends Handler {
 	private function getArchivedSubmissionIds($contextId, $candidateArticleIds) {
 		$candidateArticleIds = array_values(array_unique(array_filter(array_map('intval', $candidateArticleIds))));
 		if (!$candidateArticleIds) return array();
-		$query = Capsule::table('submissions as s')
+		$query = DB::table('submissions as s')
 			->leftJoin('edit_decisions as ed', function ($join) {
 				$join->on('ed.submission_id', '=', 's.submission_id')
-					->whereRaw('ed.edit_decision_id = (SELECT MAX(ed_archive.edit_decision_id) FROM edit_decisions ed_archive WHERE ed_archive.submission_id = s.submission_id)');
+					->whereRaw('ed.edit_decision_id = (SELECT MAX(ed_archive.edit_decision_id) FROM edit_decisions ed_archive WHERE ed_archive.submission_id = s.submission_id AND ed_archive.decision NOT IN (' . $this->recommendationDecisionSql() . '))');
 			})
 			->where('s.context_id', (int) $contextId)
 			->whereIn('s.submission_id', $candidateArticleIds)
@@ -1092,14 +1112,14 @@ class JournalPaymentHandler extends Handler {
 		return "CASE"
 			. " WHEN s.status = 3 THEN 'published'"
 			. " WHEN s.status = 5 THEN 'scheduled'"
-			. " WHEN s.status = 4 OR ed.decision IN (4, 9) THEN 'declined'"
-			. " WHEN s.stage_id = 5 OR ed.decision = 7 THEN 'production'"
+			. " WHEN s.status = 4 OR ed.decision IN (" . Decision::DECLINE . ", " . Decision::INITIAL_DECLINE . ") THEN 'declined'"
+			. " WHEN s.stage_id = 5 OR ed.decision = " . Decision::SEND_TO_PRODUCTION . " THEN 'production'"
 			. " WHEN s.stage_id = 4 THEN 'copyediting'"
-			. " WHEN ed.decision = 2 THEN 'revisionsRequired'"
-			. " WHEN ed.decision = 3 THEN 'resubmitForReview'"
-			. " WHEN ed.decision = 1 THEN 'accepted'"
+			. " WHEN ed.decision = " . Decision::PENDING_REVISIONS . " THEN 'revisionsRequired'"
+			. " WHEN ed.decision = " . Decision::RESUBMIT . " THEN 'resubmitForReview'"
+			. " WHEN ed.decision = " . Decision::ACCEPT . " THEN 'accepted'"
 			. " WHEN s.stage_id = 2 THEN 'internalReview'"
-			. " WHEN s.stage_id = 3 OR ed.decision IN (8, 16) THEN 'inReview'"
+			. " WHEN s.stage_id = 3 OR ed.decision IN (" . Decision::EXTERNAL_REVIEW . ", " . Decision::NEW_EXTERNAL_ROUND . ") THEN 'inReview'"
 			. " WHEN s.stage_id = 1 THEN 'submitted'"
 			. " ELSE 'unknown' END";
 	}
@@ -1108,10 +1128,10 @@ class JournalPaymentHandler extends Handler {
 	private function getSubmissionIdsByEditorialStatus($contextId, $status, $candidateArticleIds) {
 		$candidateArticleIds = array_values(array_unique(array_filter(array_map('intval', $candidateArticleIds))));
 		if (!$candidateArticleIds) return array();
-		$query = Capsule::table('submissions as s')
+		$query = DB::table('submissions as s')
 			->leftJoin('edit_decisions as ed', function ($join) {
 				$join->on('ed.submission_id', '=', 's.submission_id')
-					->whereRaw('ed.edit_decision_id = (SELECT MAX(ed_latest.edit_decision_id) FROM edit_decisions ed_latest WHERE ed_latest.submission_id = s.submission_id)');
+					->whereRaw('ed.edit_decision_id = (SELECT MAX(ed_latest.edit_decision_id) FROM edit_decisions ed_latest WHERE ed_latest.submission_id = s.submission_id AND ed_latest.decision NOT IN (' . $this->recommendationDecisionSql() . '))');
 			})
 			->where('s.context_id', (int) $contextId)
 			->whereIn('s.submission_id', $candidateArticleIds)
@@ -1120,7 +1140,7 @@ class JournalPaymentHandler extends Handler {
 		foreach ($query->select('s.submission_id')->get() as $row) $ids[] = (string) $row->submission_id;
 		if ($status === 'unknown') {
 			$knownIds = array();
-			foreach (Capsule::table('submissions')
+			foreach (DB::table('submissions')
 				->where('context_id', (int) $contextId)
 				->whereIn('submission_id', $candidateArticleIds)
 				->select('submission_id')->get() as $known) $knownIds[] = (int) $known->submission_id;
@@ -1136,8 +1156,9 @@ class JournalPaymentHandler extends Handler {
 		if (!$ids) return array();
 
 		$latestDecisionIds = array();
-		foreach (Capsule::table('edit_decisions')
+		foreach (DB::table('edit_decisions')
 			->whereIn('submission_id', $ids)
+			->whereNotIn('decision', $this->recommendationDecisions())
 			->select('submission_id')
 			->selectRaw('MAX(edit_decision_id) AS latest_decision_id')
 			->groupBy('submission_id')
@@ -1146,7 +1167,7 @@ class JournalPaymentHandler extends Handler {
 		}
 		$latestDecisions = array();
 		$latestDecisionDates = array();
-		if ($latestDecisionIds) foreach (Capsule::table('edit_decisions')
+		if ($latestDecisionIds) foreach (DB::table('edit_decisions')
 			->whereIn('edit_decision_id', array_keys($latestDecisionIds))
 			->select('submission_id', 'decision', 'date_decided')
 			->get() as $decisionRow) {
@@ -1155,7 +1176,7 @@ class JournalPaymentHandler extends Handler {
 			}
 
 		$map = array();
-		$submissions = Capsule::table('submissions')
+		$submissions = DB::table('submissions')
 			->where('context_id', (int) $contextId)
 			->whereIn('submission_id', $ids)
 			->select('submission_id', 'status', 'stage_id')
@@ -1168,14 +1189,14 @@ class JournalPaymentHandler extends Handler {
 
 			if ($submissionStatus === 3) $key = 'published';
 			elseif ($submissionStatus === 5) $key = 'scheduled';
-			elseif ($submissionStatus === 4 || in_array($decision, array(4, 9), true)) $key = 'declined';
-			elseif ($stageId === 5 || $decision === 7) $key = 'production';
+			elseif ($submissionStatus === 4 || in_array($decision, array(Decision::DECLINE, Decision::INITIAL_DECLINE), true)) $key = 'declined';
+			elseif ($stageId === 5 || $decision === Decision::SEND_TO_PRODUCTION) $key = 'production';
 			elseif ($stageId === 4) $key = 'copyediting';
-			elseif ($decision === 2) $key = 'revisionsRequired';
-			elseif ($decision === 3) $key = 'resubmitForReview';
-			elseif ($decision === 1) $key = 'accepted';
+			elseif ($decision === Decision::PENDING_REVISIONS) $key = 'revisionsRequired';
+			elseif ($decision === Decision::RESUBMIT) $key = 'resubmitForReview';
+			elseif ($decision === Decision::ACCEPT) $key = 'accepted';
 			elseif ($stageId === 2) $key = 'internalReview';
-			elseif ($stageId === 3 || in_array($decision, array(8, 16), true)) $key = 'inReview';
+			elseif ($stageId === 3 || in_array($decision, array(Decision::EXTERNAL_REVIEW, Decision::NEW_EXTERNAL_ROUND), true)) $key = 'inReview';
 			elseif ($stageId === 1) $key = 'submitted';
 			else $key = 'unknown';
 			$map[$id] = $options[$key];
@@ -1197,7 +1218,7 @@ class JournalPaymentHandler extends Handler {
 		$deadlineKey = $statusKey . '|' . $decisionFingerprint;
 		if (!$requiresAuthor) {
 			if ($currentDue !== '' || $currentKey !== '' || $isManual) {
-				Capsule::table('journal_payment_records')->where('context_id', (int) $contextId)->where('payment_id', (int) $record->payment_id)->update(array(
+				DB::table('journal_payment_records')->where('context_id', (int) $contextId)->where('payment_id', (int) $record->payment_id)->update(array(
 					'action_due_date' => null, 'deadline_status_key' => null, 'deadline_manual' => 0, 'reminder_state' => null,
 				));
 				$this->auditLog($contextId, null, 'schedule_changed', 'payment', $record->payment_id, isset($record->article_id) ? $record->article_id : null, array('action_due_date' => $currentDue ?: null), array('action_due_date' => null), 'Tenggat otomatis dihapus karena status OJS berubah.');
@@ -1215,7 +1236,7 @@ class JournalPaymentHandler extends Handler {
 			: date('Y-m-d');
 		$deadlineDays = max(1, min(90, (int) (self::$plugin->getSetting((int) $contextId, 'revisionDeadlineDays') ?: 14)));
 		$dueDate = date('Y-m-d', strtotime('+' . $deadlineDays . ' days', strtotime($baseDate)));
-		Capsule::table('journal_payment_records')->where('context_id', (int) $contextId)->where('payment_id', (int) $record->payment_id)->update(array(
+		DB::table('journal_payment_records')->where('context_id', (int) $contextId)->where('payment_id', (int) $record->payment_id)->update(array(
 			'action_due_date' => $dueDate,
 			'deadline_status_key' => $deadlineKey,
 			'deadline_manual' => 0,
@@ -1322,7 +1343,7 @@ class JournalPaymentHandler extends Handler {
 		self::$plugin->updateSetting($contextId, 'reminderLastSweepAt', (string) time(), 'string');
 		$today = date('Y-m-d');
 		$limitDate = date('Y-m-d', strtotime('+7 days'));
-		$query = Capsule::table('journal_payment_records')->where('context_id', $contextId)->whereBetween('action_due_date', array($today, $limitDate))->orderBy('action_due_date', 'asc')->limit(50);
+		$query = DB::table('journal_payment_records')->where('context_id', $contextId)->whereBetween('action_due_date', array($today, $limitDate))->orderBy('action_due_date', 'asc')->limit(50);
 		if ($accessibleSubmissionIds !== null) $query->whereIn('article_id', $accessibleSubmissionIds ?: array('0'));
 		foreach ($query->get() as $record) {
 			$id = (int) $record->article_id;
@@ -1337,7 +1358,7 @@ class JournalPaymentHandler extends Handler {
 			try {
 				if ($this->sendDeadlineReminder($request, $context, $record, $status, $days)) {
 					$state[$key] = date('c');
-					Capsule::table('journal_payment_records')->where('context_id', $contextId)->where('payment_id', (int) $record->payment_id)->update(array('reminder_state' => json_encode($state), 'updated_at' => date('Y-m-d H:i:s')));
+					DB::table('journal_payment_records')->where('context_id', $contextId)->where('payment_id', (int) $record->payment_id)->update(array('reminder_state' => json_encode($state), 'updated_at' => date('Y-m-d H:i:s')));
 				}
 			} catch (Throwable $e) { error_log('Journal Payment deadline reminder failed: ' . $e->getMessage()); }
 		}
@@ -1348,19 +1369,18 @@ class JournalPaymentHandler extends Handler {
 		$contactName = trim((string) $context->getData('contactName'));
 		if (!filter_var($contactEmail, FILTER_VALIDATE_EMAIL) || !filter_var($record->payer_email, FILTER_VALIDATE_EMAIL)) return false;
 		$this->ensureDocumentAccessToken($context->getId(), $record);
-		$statusUrl = $request->getDispatcher()->url($request, ROUTE_PAGE, $context->getPath(), 'journalPayment', 'status', null, array('articleId' => $record->article_id, 'access' => $record->document_access_token));
+		$statusUrl = $request->getDispatcher()->url($request, Application::ROUTE_PAGE, $context->getPath(), 'journalPayment', 'status', null, array('articleId' => $record->article_id, 'access' => $record->document_access_token));
 		$escape = function ($value) { return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8'); };
 		$body = '<p>Yth. ' . $escape($record->payer_name) . ',</p>'
 			. '<p>Artikel ID <strong>' . $escape($record->article_id) . '</strong> berstatus <strong>' . $escape($status['label']) . '</strong>. Tenggat pengiriman revisi adalah <strong>' . $escape(date('d-m-Y', strtotime($record->action_due_date))) . '</strong> (' . $days . ' hari lagi).</p>'
 			. '<p>Silakan unggah naskah revisi dan tanggapan kepada reviewer melalui workflow OJS. Ringkasan perjalanan publikasi dapat dilihat di:<br><a href="' . $escape($statusUrl) . '">' . $escape($statusUrl) . '</a></p>'
 			. '<p>Hormat kami,<br>' . $escape($context->getLocalizedName()) . '</p>';
-		import('lib.pkp.classes.mail.Mail');
-		$mail = new Mail();
-		$mail->setFrom($contactEmail, $contactName !== '' ? $contactName : $context->getLocalizedName());
-		$mail->addRecipient($record->payer_email, $record->payer_name);
+		$mail = new Mailable();
+		$mail->from($contactEmail, $contactName !== '' ? $contactName : $context->getLocalizedName());
+		$mail->to($record->payer_email, $record->payer_name);
 		$subject = 'Pengingat Revisi ' . $days . ' Hari - ID Artikel ' . $record->article_id;
-		$mail->setSubject($subject);
-		$mail->setBody($body);
+		$mail->subject($subject);
+		$mail->body($body);
 		return $this->sendAndLogEmail($mail, $context->getId(), $record, 'deadline_reminder', $subject, $request);
 	}
 
@@ -1371,8 +1391,8 @@ class JournalPaymentHandler extends Handler {
 		if (!filter_var($contactEmail, FILTER_VALIDATE_EMAIL) || !filter_var($record->payer_email, FILTER_VALIDATE_EMAIL)) return false;
 
 		$this->ensureDocumentAccessToken($context->getId(), $record);
-		$statusUrl = $request->getDispatcher()->url($request, ROUTE_PAGE, $context->getPath(), 'journalPayment', 'status', null, array('articleId' => $record->article_id, 'access' => $record->document_access_token));
-		$receiptUrl = $request->getDispatcher()->url($request, ROUTE_PAGE, $context->getPath(), 'journalPayment', 'receipt', null, array('articleId' => $record->article_id, 'access' => $record->document_access_token));
+		$statusUrl = $request->getDispatcher()->url($request, Application::ROUTE_PAGE, $context->getPath(), 'journalPayment', 'status', null, array('articleId' => $record->article_id, 'access' => $record->document_access_token));
+		$receiptUrl = $request->getDispatcher()->url($request, Application::ROUTE_PAGE, $context->getPath(), 'journalPayment', 'receipt', null, array('articleId' => $record->article_id, 'access' => $record->document_access_token));
 		$escape = function ($value) { return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8'); };
 		$publicationDate = !empty($record->publication_date) ? date('d-m-Y', strtotime($record->publication_date)) : '-';
 		$body = '<p>Yth. ' . $escape($record->payer_name) . ',</p>'
@@ -1390,14 +1410,12 @@ class JournalPaymentHandler extends Handler {
 			. '<p>Tautan kuitansi (aktif setelah pembayaran terverifikasi):<br><a href="' . $escape($receiptUrl) . '">' . $escape($receiptUrl) . '</a></p>'
 			. '<p><em>Email ini merupakan konfirmasi penerimaan bukti pembayaran, bukan konfirmasi bahwa pembayaran telah terverifikasi.</em></p>'
 			. '<p>Hormat kami,<br>' . $escape($context->getLocalizedName()) . '</p>';
-
-		import('lib.pkp.classes.mail.Mail');
-		$mail = new Mail();
-		$mail->setFrom($contactEmail, $contactName !== '' ? $contactName : $context->getLocalizedName());
-		$mail->addRecipient($record->payer_email, $record->payer_name);
+		$mail = new Mailable();
+		$mail->from($contactEmail, $contactName !== '' ? $contactName : $context->getLocalizedName());
+		$mail->to($record->payer_email, $record->payer_name);
 		$subject = 'Bukti Pembayaran Diterima - ID Artikel ' . $record->article_id;
-		$mail->setSubject($subject);
-		$mail->setBody($body);
+		$mail->subject($subject);
+		$mail->body($body);
 		return $this->sendAndLogEmail($mail, $context->getId(), $record, 'payment_acknowledgement', $subject, $request);
 	}
 
@@ -1407,20 +1425,20 @@ class JournalPaymentHandler extends Handler {
 		$returnView = trim((string) $request->getUserVar('returnView'));
 		if (in_array($returnView, array('active', 'archive', 'finance', 'production', 'drive', 'audit'), true) && !isset($params['view'])) $params['view'] = $returnView;
 		if ($context && $this->isFullPaymentManager($request->getUser(), $context->getId())) {
-			$url = $request->getDispatcher()->url($request, ROUTE_PAGE, null, 'management', 'settings', 'website', $params, 'journalPayment');
+			$url = $request->getDispatcher()->url($request, Application::ROUTE_PAGE, null, 'management', 'settings', array('website'), $params, 'journalPayment');
 		} else {
-			$url = $request->getDispatcher()->url($request, ROUTE_PAGE, $context ? $context->getPath() : null, 'journalPayment', 'manage', null, $params);
+			$url = $request->getDispatcher()->url($request, Application::ROUTE_PAGE, $context ? $context->getPath() : null, 'journalPayment', 'manage', null, $params);
 		}
 		$request->redirectUrl($url);
 	}
 
 	/** Create immutable fee rows from Assistant assignments enabled for OJS Production. */
 	private function syncProductionEditorFees($contextId) {
-		$productionStage = defined('WORKFLOW_STAGE_ID_PRODUCTION') ? constant('WORKFLOW_STAGE_ID_PRODUCTION') : 5;
-		$assistantRole = defined('ROLE_ID_ASSISTANT') ? constant('ROLE_ID_ASSISTANT') : 4097;
+		$productionStage = WORKFLOW_STAGE_ID_PRODUCTION;
+		$assistantRole = Role::ROLE_ID_ASSISTANT;
 		$defaultFee = self::$plugin->getSetting((int) $contextId, 'productionEditorFee');
 		$defaultFee = max(0, min(100000000, $defaultFee === null ? 100000 : (int) $defaultFee));
-		$assignments = Capsule::table('journal_payment_records as p')
+		$assignments = DB::table('journal_payment_records as p')
 			->join('submissions as s', 's.submission_id', '=', 'p.article_id')
 			->join('stage_assignments as sa', 'sa.submission_id', '=', 's.submission_id')
 			->join('user_groups as ug', 'ug.user_group_id', '=', 'sa.user_group_id')
@@ -1441,12 +1459,12 @@ class JournalPaymentHandler extends Handler {
 			->orderBy('sa.stage_assignment_id')->get();
 		$now = date('Y-m-d H:i:s');
 		foreach ($assignments as $assignment) {
-			$exists = Capsule::table('journal_payment_production_fees')
+			$exists = DB::table('journal_payment_production_fees')
 				->where('payment_id', (int) $assignment->payment_id)
 				->where('production_editor_user_id', (int) $assignment->user_id)->exists();
 			if ($exists) continue;
 			try {
-				$feeId = Capsule::table('journal_payment_production_fees')->insertGetId(array(
+				$feeId = DB::table('journal_payment_production_fees')->insertGetId(array(
 					'context_id' => (int) $contextId,
 					'payment_id' => (int) $assignment->payment_id,
 					'article_id' => (string) $assignment->article_id,
@@ -1465,22 +1483,21 @@ class JournalPaymentHandler extends Handler {
 	}
 
 	private function getProductionFeeDashboardData($contextId, $user, $isFullManager) {
-		$query = Capsule::table('journal_payment_production_fees as f')
+		$query = DB::table('journal_payment_production_fees as f')
 			->join('journal_payment_records as p', 'p.payment_id', '=', 'f.payment_id')
 			->where('f.context_id', (int) $contextId)
 			->select('f.*', 'p.article_title', 'p.publication_date');
 		if (!$isFullManager) $query->where('f.production_editor_user_id', (int) $user->getId());
 		$fees = $query->orderBy('f.assigned_at', 'desc')->get();
-		$payoutQuery = Capsule::table('journal_payment_production_payouts')->where('context_id', (int) $contextId)->orderBy('created_at', 'desc');
+		$payoutQuery = DB::table('journal_payment_production_payouts')->where('context_id', (int) $contextId)->orderBy('created_at', 'desc');
 		if (!$isFullManager) $payoutQuery->where('production_editor_user_id', (int) $user->getId());
 		$payouts = $payoutQuery->get();
 		$userIds = array();
 		foreach ($fees as $fee) $userIds[(int) $fee->production_editor_user_id] = true;
 		foreach ($payouts as $payout) $userIds[(int) $payout->production_editor_user_id] = true;
-		$userDao = DAORegistry::getDAO('UserDAO');
 		$names = array();
 		foreach (array_keys($userIds) as $userId) {
-			$productionEditor = $userDao->getById($userId);
+			$productionEditor = $this->getUserById($userId);
 			$names[$userId] = $productionEditor ? $productionEditor->getFullName() : 'Production Editor #' . $userId;
 		}
 		$groups = array();
@@ -1517,26 +1534,26 @@ class JournalPaymentHandler extends Handler {
 		if ($action === 'confirmReceived') {
 			$payoutId = (int) $request->getUserVar('productionPayoutId');
 			$notes = mb_substr(trim((string) $request->getUserVar('productionEditorNotes')), 0, 5000);
-			$payout = Capsule::table('journal_payment_production_payouts')->where('context_id', $contextId)->where('production_payout_id', $payoutId)->where('production_editor_user_id', (int) $user->getId())->where('status', 'pending')->first();
+			$payout = DB::table('journal_payment_production_payouts')->where('context_id', $contextId)->where('production_payout_id', $payoutId)->where('production_editor_user_id', (int) $user->getId())->where('status', 'pending')->first();
 			if (!$payout) { $this->redirectManagerDashboard($request, array('view' => 'production', 'productionResult' => 'invalid')); return; }
-			Capsule::table('journal_payment_production_payouts')->where('production_payout_id', $payoutId)->where('status', 'pending')->update(array('status' => 'received', 'production_editor_notes' => $notes ?: null, 'received_at' => date('Y-m-d H:i:s'), 'received_by' => (int) $user->getId(), 'updated_at' => date('Y-m-d H:i:s')));
+			DB::table('journal_payment_production_payouts')->where('production_payout_id', $payoutId)->where('status', 'pending')->update(array('status' => 'received', 'production_editor_notes' => $notes ?: null, 'received_at' => date('Y-m-d H:i:s'), 'received_by' => (int) $user->getId(), 'updated_at' => date('Y-m-d H:i:s')));
 			$this->auditLog($contextId, $request, 'production_payout_received', 'production_payout', $payoutId, null, array('status' => 'pending'), array('status' => 'received', 'amount' => (int) $payout->amount), 'Production Editor mengonfirmasi dana telah diterima.');
 			$this->redirectManagerDashboard($request, array('view' => 'production', 'productionResult' => 'received')); return;
 		}
-		if (!$isFullManager) fatalError('Hanya pengelola pembayaran berakses penuh yang dapat mengatur dan membayar fee Production Editor.');
+		if (!$isFullManager) $this->fail('Hanya pengelola pembayaran berakses penuh yang dapat mengatur dan membayar fee Production Editor.');
 		if ($action === 'updateFee') {
 			$feeId = (int) $request->getUserVar('productionFeeId');
 			$amount = (int) preg_replace('/[^0-9]/', '', (string) $request->getUserVar('productionFeeAmount'));
-			$fee = Capsule::table('journal_payment_production_fees')->where('context_id', $contextId)->where('production_fee_id', $feeId)->first();
+			$fee = DB::table('journal_payment_production_fees')->where('context_id', $contextId)->where('production_fee_id', $feeId)->first();
 			if (!$fee || $amount < 0 || $amount > 100000000) { $this->redirectManagerDashboard($request, array('view' => 'production', 'productionResult' => 'invalid')); return; }
-			$otherFees = (int) Capsule::table('journal_payment_production_fees')->where('context_id', $contextId)->where('production_editor_user_id', (int) $fee->production_editor_user_id)->where('production_fee_id', '<>', $feeId)->sum('amount');
-			$committedPayouts = (int) Capsule::table('journal_payment_production_payouts')->where('context_id', $contextId)->where('production_editor_user_id', (int) $fee->production_editor_user_id)->whereIn('status', array('pending', 'received'))->sum('amount');
+			$otherFees = (int) DB::table('journal_payment_production_fees')->where('context_id', $contextId)->where('production_editor_user_id', (int) $fee->production_editor_user_id)->where('production_fee_id', '<>', $feeId)->sum('amount');
+			$committedPayouts = (int) DB::table('journal_payment_production_payouts')->where('context_id', $contextId)->where('production_editor_user_id', (int) $fee->production_editor_user_id)->whereIn('status', array('pending', 'received'))->sum('amount');
 			if ($otherFees + $amount < $committedPayouts) { $this->redirectManagerDashboard($request, array('view' => 'production', 'productionResult' => 'invalid')); return; }
-			Capsule::table('journal_payment_production_fees')->where('production_fee_id', $feeId)->update(array('amount' => $amount, 'updated_at' => date('Y-m-d H:i:s')));
+			DB::table('journal_payment_production_fees')->where('production_fee_id', $feeId)->update(array('amount' => $amount, 'updated_at' => date('Y-m-d H:i:s')));
 			$this->auditLog($contextId, $request, 'production_fee_updated', 'production_fee', $feeId, $fee->article_id, array('amount' => (int) $fee->amount), array('amount' => $amount), 'Nominal fee per artikel disesuaikan.');
 			$this->redirectManagerDashboard($request, array('view' => 'production', 'productionResult' => 'feeUpdated')); return;
 		}
-		if ($action !== 'createPayout') fatalError('Tindakan fee Production Editor tidak dikenal.');
+		if ($action !== 'createPayout') $this->fail('Tindakan fee Production Editor tidak dikenal.');
 		$productionEditorId = (int) $request->getUserVar('productionEditorId');
 		$amount = (int) preg_replace('/[^0-9]/', '', (string) $request->getUserVar('productionPayoutAmount'));
 		$notes = mb_substr(trim((string) $request->getUserVar('productionPayoutNotes')), 0, 5000);
@@ -1549,19 +1566,19 @@ class JournalPaymentHandler extends Handler {
 		if (!$validated['valid']) { $this->redirectManagerDashboard($request, array('view' => 'production', 'productionResult' => 'invalidFile')); return; }
 		$stored = $this->storeProductionPayoutUpload($file, $validated, $contextId);
 		if (!$stored['success']) { $this->redirectManagerDashboard($request, array('view' => 'production', 'productionResult' => 'failed')); return; }
-		$connection = Capsule::connection();
+		$connection = DB::connection();
 		$started = false;
 		try {
 			$connection->beginTransaction(); $started = true;
-			$feeRows = Capsule::table('journal_payment_production_fees')->where('context_id', $contextId)->where('production_editor_user_id', $productionEditorId)->select('amount')->lockForUpdate()->get();
-			$payoutRows = Capsule::table('journal_payment_production_payouts')->where('context_id', $contextId)->where('production_editor_user_id', $productionEditorId)->whereIn('status', array('pending', 'received'))->select('amount')->lockForUpdate()->get();
+			$feeRows = DB::table('journal_payment_production_fees')->where('context_id', $contextId)->where('production_editor_user_id', $productionEditorId)->select('amount')->lockForUpdate()->get();
+			$payoutRows = DB::table('journal_payment_production_payouts')->where('context_id', $contextId)->where('production_editor_user_id', $productionEditorId)->whereIn('status', array('pending', 'received'))->select('amount')->lockForUpdate()->get();
 			$feeTotal = 0; foreach ($feeRows as $feeRow) $feeTotal += (int) $feeRow->amount;
 			$committed = 0; foreach ($payoutRows as $payoutRow) $committed += (int) $payoutRow->amount;
 			if ($amount > max(0, $feeTotal - $committed)) {
 				$connection->rollBack(); $started = false; @unlink($stored['path']);
 				$this->redirectManagerDashboard($request, array('view' => 'production', 'productionResult' => 'invalid')); return;
 			}
-			$payoutId = Capsule::table('journal_payment_production_payouts')->insertGetId(array('context_id' => $contextId, 'production_editor_user_id' => $productionEditorId, 'amount' => $amount, 'proof_file' => $stored['file'], 'proof_name' => mb_substr(basename((string) $file['name']), 0, 255), 'proof_mime' => $validated['mime'], 'status' => 'pending', 'manager_notes' => $notes ?: null, 'created_by' => (int) $user->getId(), 'created_at' => date('Y-m-d H:i:s'), 'updated_at' => date('Y-m-d H:i:s')));
+			$payoutId = DB::table('journal_payment_production_payouts')->insertGetId(array('context_id' => $contextId, 'production_editor_user_id' => $productionEditorId, 'amount' => $amount, 'proof_file' => $stored['file'], 'proof_name' => mb_substr(basename((string) $file['name']), 0, 255), 'proof_mime' => $validated['mime'], 'status' => 'pending', 'manager_notes' => $notes ?: null, 'created_by' => (int) $user->getId(), 'created_at' => date('Y-m-d H:i:s'), 'updated_at' => date('Y-m-d H:i:s')));
 			$connection->commit(); $started = false;
 		} catch (Throwable $e) {
 			if ($started) $connection->rollBack(); @unlink($stored['path']);
@@ -1584,7 +1601,7 @@ class JournalPaymentHandler extends Handler {
 
 	public function productionPayoutProof($args, $request) {
 		$context = $this->requirePaymentStaff($request);
-		$row = Capsule::table('journal_payment_production_payouts')->where('context_id', (int) $context->getId())->where('production_payout_id', (int) $request->getUserVar('id'))->first();
+		$row = DB::table('journal_payment_production_payouts')->where('context_id', (int) $context->getId())->where('production_payout_id', (int) $request->getUserVar('id'))->first();
 		if (!$row || (!$this->isFullPaymentManager($request->getUser(), $context->getId()) && (int) $row->production_editor_user_id !== (int) $request->getUser()->getId())) { http_response_code(404); exit; }
 		$path = $this->uploadDirectory($context->getId()) . DIRECTORY_SEPARATOR . 'productionPayouts' . DIRECTORY_SEPARATOR . basename((string) $row->proof_file);
 		if (!is_file($path)) { http_response_code(404); exit; }
@@ -1597,8 +1614,8 @@ class JournalPaymentHandler extends Handler {
 
 	/** Build issue/editor finance groups from verified payments whose OJS submission is published. */
 	private function getFinanceDashboardData($contextId, $user, $isFullManager) {
-		$publishedStatus = defined('STATUS_PUBLISHED') ? constant('STATUS_PUBLISHED') : 3;
-		$query = Capsule::table('journal_payment_records as p')
+		$publishedStatus = Submission::STATUS_PUBLISHED;
+		$query = DB::table('journal_payment_records as p')
 			->join('submissions as s', 's.submission_id', '=', 'p.article_id')
 			->where('p.context_id', (int) $contextId)
 			->where('s.context_id', (int) $contextId)
@@ -1643,7 +1660,7 @@ class JournalPaymentHandler extends Handler {
 			if ($updates) {
 				$record->finance_locked_at = $now;
 				$updates['finance_locked_at'] = $now;
-				Capsule::table('journal_payment_records')->where('context_id', (int) $contextId)->where('payment_id', (int) $record->payment_id)->update($updates);
+				DB::table('journal_payment_records')->where('context_id', (int) $contextId)->where('payment_id', (int) $record->payment_id)->update($updates);
 			}
 		}
 
@@ -1652,10 +1669,9 @@ class JournalPaymentHandler extends Handler {
 			if (!$isFullManager && (int) $record->finance_editor_id !== (int) $user->getId()) continue;
 			if (!empty($record->finance_editor_id)) $editorIds[(int) $record->finance_editor_id] = true;
 		}
-		$userDao = DAORegistry::getDAO('UserDAO');
 		$editorNames = array();
 		foreach (array_keys($editorIds) as $editorId) {
-			$editor = $userDao->getById($editorId);
+			$editor = $this->getUserById($editorId);
 			$editorNames[$editorId] = $editor ? $editor->getFullName() : 'Editor #' . $editorId;
 		}
 
@@ -1685,7 +1701,7 @@ class JournalPaymentHandler extends Handler {
 			$groups[$key]['article_rows'][] = array('article_id' => (string) $record->article_id, 'title' => (string) $record->article_title, 'amount' => (int) $record->amount, 'admin_share' => $adminShare);
 		}
 
-		$remittanceQuery = Capsule::table('journal_payment_remittances')->where('context_id', (int) $contextId)->orderBy('created_at', 'desc');
+		$remittanceQuery = DB::table('journal_payment_remittances')->where('context_id', (int) $contextId)->orderBy('created_at', 'desc');
 		if (!$isFullManager) $remittanceQuery->where('editor_user_id', (int) $user->getId());
 		$remittances = $remittanceQuery->get();
 		foreach ($remittances as $remittance) {
@@ -1696,7 +1712,7 @@ class JournalPaymentHandler extends Handler {
 			}
 			$editorId = (int) $remittance->editor_user_id;
 			if (!isset($editorNames[$editorId])) {
-				$editor = $userDao->getById($editorId);
+				$editor = $this->getUserById($editorId);
 				if ($editor) $editorNames[$editorId] = $editor->getFullName();
 			}
 			$remittance->editor_name = isset($editorNames[$editorId]) ? $editorNames[$editorId] : 'Editor #' . $editorId;
@@ -1719,19 +1735,19 @@ class JournalPaymentHandler extends Handler {
 	private function getPrimaryFinanceEditors($submissionIds) {
 		$ids = array_values(array_unique(array_filter(array_map('intval', $submissionIds))));
 		if (!$ids) return array();
-		$rows = Capsule::table('stage_assignments as sa')
+		$rows = DB::table('stage_assignments as sa')
 			->join('user_groups as ug', 'ug.user_group_id', '=', 'sa.user_group_id')
 			->leftJoin('user_group_settings as ugn', function ($join) {
 				$join->on('ugn.user_group_id', '=', 'ug.user_group_id')->where('ugn.setting_name', '=', 'name');
 			})
 			->whereIn('sa.submission_id', $ids)
-			->whereIn('ug.role_id', array(ROLE_ID_MANAGER, ROLE_ID_SUB_EDITOR))
+			->whereIn('ug.role_id', array(Role::ROLE_ID_MANAGER, Role::ROLE_ID_SUB_EDITOR))
 			->select('sa.submission_id', 'sa.user_id', 'sa.date_assigned', 'ug.role_id')
 			->orderBy('sa.date_assigned', 'desc')->orderBy('sa.stage_assignment_id', 'desc')->get();
 		$chosen = array();
 		foreach ($rows as $row) {
 			$submissionId = (int) $row->submission_id;
-			$priority = (int) $row->role_id === (int) ROLE_ID_SUB_EDITOR ? 2 : 1;
+			$priority = (int) $row->role_id === (int) Role::ROLE_ID_SUB_EDITOR ? 2 : 1;
 			if (!isset($chosen[$submissionId]) || $priority > $chosen[$submissionId]['priority']) {
 				$chosen[$submissionId] = array('user_id' => (int) $row->user_id, 'priority' => $priority);
 			}
@@ -1746,13 +1762,13 @@ class JournalPaymentHandler extends Handler {
 		$ids = array_values(array_unique(array_filter(array_map('intval', $submissionIds))));
 		if (!$ids) return array();
 		$publications = array();
-		foreach (Capsule::table('submissions')->where('context_id', (int) $contextId)->whereIn('submission_id', $ids)->select('submission_id', 'current_publication_id')->get() as $submission) {
+		foreach (DB::table('submissions')->where('context_id', (int) $contextId)->whereIn('submission_id', $ids)->select('submission_id', 'current_publication_id')->get() as $submission) {
 			if ($submission->current_publication_id) $publications[(int) $submission->current_publication_id] = (int) $submission->submission_id;
 		}
 		if (!$publications) return array();
 		$result = array();
-		foreach (Capsule::table('publication_settings')->whereIn('publication_id', array_keys($publications))->where('setting_name', 'issueId')->select('publication_id', 'setting_value')->get() as $setting) {
-			if ((int) $setting->setting_value > 0) $result[$publications[(int) $setting->publication_id]] = (int) $setting->setting_value;
+		foreach ($this->issueIdsByPublication(array_keys($publications)) as $publicationId => $issueId) {
+			if ((int) $issueId > 0) $result[$publications[(int) $publicationId]] = (int) $issueId;
 		}
 		return $result;
 	}
@@ -1783,12 +1799,12 @@ class JournalPaymentHandler extends Handler {
 				$this->redirectManagerDashboard($request, array('view' => 'finance', 'financeResult' => 'failed'));
 				return;
 			}
-			$connection = Capsule::connection();
+			$connection = DB::connection();
 			$transactionStarted = false;
 			try {
 				$connection->beginTransaction();
 				$transactionStarted = true;
-				$existingRows = Capsule::table('journal_payment_remittances')
+				$existingRows = DB::table('journal_payment_remittances')
 					->where('context_id', $contextId)->where('editor_user_id', (int) $user->getId())->where('issue_key', $issueKey)
 					->whereIn('status', array('pending', 'verified'))->select('amount')->lockForUpdate()->get();
 				$existingTotal = 0;
@@ -1799,7 +1815,7 @@ class JournalPaymentHandler extends Handler {
 					@unlink($stored['path']);
 					$this->redirectManagerDashboard($request, array('view' => 'finance', 'financeResult' => 'invalid')); return;
 				}
-				$remittanceId = Capsule::table('journal_payment_remittances')->insertGetId(array(
+				$remittanceId = DB::table('journal_payment_remittances')->insertGetId(array(
 					'context_id' => $contextId, 'editor_user_id' => (int) $user->getId(),
 					'issue_key' => $issueKey, 'issue_label' => mb_substr($group['issue_label'], 0, 255),
 					'amount' => $amount, 'proof_file' => $stored['file'], 'proof_name' => mb_substr(basename($file['name']), 0, 255),
@@ -1818,10 +1834,10 @@ class JournalPaymentHandler extends Handler {
 			$this->redirectManagerDashboard($request, array('view' => 'finance', 'financeResult' => 'submitted'));
 			return;
 		}
-		if (!$isFullManager || !in_array($action, array('verifyRemittance', 'rejectRemittance'), true)) fatalError('Tindakan keuangan tidak diizinkan.');
+		if (!$isFullManager || !in_array($action, array('verifyRemittance', 'rejectRemittance'), true)) $this->fail('Tindakan keuangan tidak diizinkan.');
 		$remittanceId = (int) $request->getUserVar('remittanceId');
 		$notes = mb_substr(trim((string) $request->getUserVar('remittanceManagerNotes')), 0, 5000);
-		$remittance = Capsule::table('journal_payment_remittances')->where('context_id', $contextId)->where('remittance_id', $remittanceId)->first();
+		$remittance = DB::table('journal_payment_remittances')->where('context_id', $contextId)->where('remittance_id', $remittanceId)->first();
 		if (!$remittance || $remittance->status !== 'pending' || ($action === 'rejectRemittance' && $notes === '')) {
 			$this->redirectManagerDashboard($request, array('view' => 'finance', 'financeResult' => 'invalidDecision'));
 			return;
@@ -1834,7 +1850,7 @@ class JournalPaymentHandler extends Handler {
 			'verified_at' => $isVerified ? date('Y-m-d H:i:s') : null,
 			'verified_by' => $isVerified ? (int) $user->getId() : null,
 		);
-		Capsule::table('journal_payment_remittances')->where('context_id', $contextId)->where('remittance_id', $remittanceId)->where('status', 'pending')->update($data);
+		DB::table('journal_payment_remittances')->where('context_id', $contextId)->where('remittance_id', $remittanceId)->where('status', 'pending')->update($data);
 		$this->auditLog($contextId, $request, $isVerified ? 'remittance_verified' : 'remittance_rejected', 'remittance', $remittanceId, null,
 			array('status' => 'pending'), array('status' => $data['status'], 'manager_notes' => $data['manager_notes'], 'amount' => (int) $remittance->amount, 'issue' => $remittance->issue_label));
 		$this->redirectManagerDashboard($request, array('view' => 'finance', 'financeResult' => $action === 'verifyRemittance' ? 'verified' : 'rejected'));
@@ -1844,7 +1860,7 @@ class JournalPaymentHandler extends Handler {
 	public function remittanceProof($args, $request) {
 		$context = $this->requirePaymentStaff($request);
 		$id = (int) $request->getUserVar('id');
-		$row = Capsule::table('journal_payment_remittances')->where('context_id', (int) $context->getId())->where('remittance_id', $id)->first();
+		$row = DB::table('journal_payment_remittances')->where('context_id', (int) $context->getId())->where('remittance_id', $id)->first();
 		if (!$row || (!$this->isFullPaymentManager($request->getUser(), $context->getId()) && (int) $row->editor_user_id !== (int) $request->getUser()->getId())) { http_response_code(404); exit; }
 		$path = $this->remittanceUploadDirectory($context->getId()) . DIRECTORY_SEPARATOR . basename((string) $row->proof_file);
 		if (!is_file($path)) { http_response_code(404); exit; }
@@ -1885,13 +1901,13 @@ class JournalPaymentHandler extends Handler {
 		$verificationFound = false;
 		if (in_array($type, array('receipt', 'loa', 'certificate'), true) && preg_match('/^[a-f0-9]{64}$/', $token)
 			&& $this->allowPublicSearch($request, $context->getId(), 'document_verify', 60, 600)) {
-			$record = Capsule::table('journal_payment_records')->where('context_id', $context->getId())->where('document_access_token', $token)->where('status', 'verified')->first();
+			$record = DB::table('journal_payment_records')->where('context_id', $context->getId())->where('document_access_token', $token)->where('status', 'verified')->first();
 			if ($record) {
 				$field = $type === 'receipt' ? 'verified_at' : ($type === 'loa' ? 'loa_issued_at' : 'certificate_issued_at');
 				$verificationFound = !empty($record->{$field});
 				if ($verificationFound) {
 					$this->applyIssueMetadata($context->getId(), $record);
-					$query = Capsule::table('journal_payment_documents')->where('context_id', (int) $context->getId())->where('payment_id', (int) $record->payment_id)->where('document_type', $type);
+					$query = DB::table('journal_payment_documents')->where('context_id', (int) $context->getId())->where('payment_id', (int) $record->payment_id)->where('document_type', $type);
 					if ($version > 0) $query->where('version_number', $version);
 					else $query->where('status', 'active')->orderBy('version_number', 'desc');
 					$documentRow = $query->first();
@@ -1925,7 +1941,7 @@ class JournalPaymentHandler extends Handler {
 		$documentNumber = trim((string) $record->{$numberField});
 		$documentUrl = $request->getDispatcher()->url(
 			$request,
-			ROUTE_PAGE,
+			Application::ROUTE_PAGE,
 			$context->getPath(),
 			'journalPayment',
 			$type,
@@ -1944,31 +1960,29 @@ class JournalPaymentHandler extends Handler {
 			. '<p>Versi PDF: <strong>' . (int) $protected['row']->version_number . '</strong><br>Fingerprint SHA-256: <code>' . $escape($protected['row']->sha256) . '</code></p>'
 			. '<p>Silakan membuka atau menyimpan dokumen melalui tautan resmi berikut:<br><a href="' . $escape($documentUrl) . '">' . $escape($documentUrl) . '</a></p>'
 			. '<p>Hormat kami,<br>' . $escape($context->getLocalizedName()) . '</p>';
-
-		import('lib.pkp.classes.mail.Mail');
-		$mail = new Mail();
+		$mail = new Mailable();
 		$contactEmail = trim((string) $context->getData('contactEmail'));
 		$contactName = trim((string) $context->getData('contactName'));
 		if (!filter_var($contactEmail, FILTER_VALIDATE_EMAIL)) return false;
-		$mail->setFrom($contactEmail, $contactName !== '' ? $contactName : $context->getLocalizedName());
-		$mail->addRecipient($record->payer_email, $record->payer_name);
-		$mail->setSubject($subject);
-		$mail->setBody($body);
+		$mail->from($contactEmail, $contactName !== '' ? $contactName : $context->getLocalizedName());
+		$mail->to($record->payer_email, $record->payer_name);
+		$mail->subject($subject);
+		$mail->body($body);
 		return $this->sendAndLogEmail($mail, $context->getId(), $record, $isLoa ? 'loa_delivery' : 'certificate_delivery', $subject, $request);
 	}
 
 	private function document($request, $type) {
 		$context = $this->requireContext($request);
 		$articleId = trim((string) $request->getUserVar('articleId'));
-		if (!ctype_digit($articleId)) fatalError('Dokumen tidak ditemukan.');
-		$record = Capsule::table('journal_payment_records')->where('context_id', $context->getId())->where('article_id', $articleId)->where('status', 'verified')->orderBy('verified_at', 'desc')->first();
+		if (!ctype_digit($articleId)) $this->fail('Dokumen tidak ditemukan.');
+		$record = DB::table('journal_payment_records')->where('context_id', $context->getId())->where('article_id', $articleId)->where('status', 'verified')->orderBy('verified_at', 'desc')->first();
 		if ($record) $this->ensureDocumentAccessToken($context->getId(), $record);
 		$accessToken = trim((string) $request->getUserVar('access'));
 		$field = $type === 'loa' ? 'loa_issued_at' : 'certificate_issued_at';
 		$issuedAt = $record && isset($record->{$field}) ? (string) $record->{$field} : '';
-		if (!$record || $issuedAt === '' || !$this->documentAccessAllowed($request, $context->getId(), $record, $accessToken)) { http_response_code(404); fatalError('Dokumen tidak ditemukan atau tautan akses tidak valid.'); }
+		if (!$record || $issuedAt === '' || !$this->documentAccessAllowed($request, $context->getId(), $record, $accessToken)) { http_response_code(404); $this->fail('Dokumen tidak ditemukan atau tautan akses tidak valid.'); }
 		$document = $this->ensureProtectedDocument($request, $context, $record, $type);
-		if (!$document['success']) { http_response_code(503); fatalError($document['error']); }
+		if (!$document['success']) { http_response_code(503); $this->fail($document['error']); }
 		$this->streamProtectedDocument($document['row'], $request);
 	}
 
@@ -1977,15 +1991,14 @@ class JournalPaymentHandler extends Handler {
 		$contextId = (int) $context->getId();
 		$paymentId = (int) $record->payment_id;
 		if (!in_array($type, array('receipt', 'loa', 'certificate'), true)) return array('success' => false, 'error' => 'Jenis dokumen tidak dikenal.');
-		$active = Capsule::table('journal_payment_documents')->where('context_id', $contextId)->where('payment_id', $paymentId)->where('document_type', $type)->where('status', 'active')->orderBy('version_number', 'desc')->first();
+		$active = DB::table('journal_payment_documents')->where('context_id', $contextId)->where('payment_id', $paymentId)->where('document_type', $type)->where('status', 'active')->orderBy('version_number', 'desc')->first();
 		if ($active) {
 			$activePath = $this->protectedDocumentDirectory($contextId) . DIRECTORY_SEPARATOR . basename((string) $active->stored_file);
 			if ($this->isValidStoredPdf($activePath, $active->sha256)) return array('success' => true, 'row' => $active);
-			Capsule::table('journal_payment_documents')->where('document_id', (int) $active->document_id)->update(array('status' => 'revoked', 'revoked_at' => date('Y-m-d H:i:s')));
+			DB::table('journal_payment_documents')->where('document_id', (int) $active->document_id)->update(array('status' => 'revoked', 'revoked_at' => date('Y-m-d H:i:s')));
 			$this->auditLog($contextId, $request, 'document_integrity_failed', 'protected_document', $active->document_id, $record->article_id, array('sha256' => $active->sha256), array('status' => 'revoked'), 'Fingerprint berkas tidak cocok atau berkas privat hilang.');
 		}
 
-		self::$plugin->import('JournalPaymentPdfGenerator');
 		$generator = new JournalPaymentPdfGenerator();
 		if (!$generator->isAvailable()) return array('success' => false, 'error' => $generator->getUnavailableMessage());
 		$this->ensureDocumentAccessToken($contextId, $record);
@@ -1998,30 +2011,30 @@ class JournalPaymentHandler extends Handler {
 		$issuedAt = trim((string) $record->{$issuedField});
 		if ($documentNumber === '' || $issuedAt === '') return array('success' => false, 'error' => 'Dokumen belum diterbitkan.');
 
-		$connection = Capsule::connection();
+		$connection = DB::connection();
 		$started = false;
 		$path = null;
 		try {
 			$connection->beginTransaction(); $started = true;
-			Capsule::table('journal_payment_records')->where('context_id', $contextId)->where('payment_id', $paymentId)->lockForUpdate()->first();
-			$existing = Capsule::table('journal_payment_documents')->where('context_id', $contextId)->where('payment_id', $paymentId)->where('document_type', $type)->where('status', 'active')->orderBy('version_number', 'desc')->first();
+			DB::table('journal_payment_records')->where('context_id', $contextId)->where('payment_id', $paymentId)->lockForUpdate()->first();
+			$existing = DB::table('journal_payment_documents')->where('context_id', $contextId)->where('payment_id', $paymentId)->where('document_type', $type)->where('status', 'active')->orderBy('version_number', 'desc')->first();
 			if ($existing) {
 				$existingPath = $this->protectedDocumentDirectory($contextId) . DIRECTORY_SEPARATOR . basename((string) $existing->stored_file);
 				if ($this->isValidStoredPdf($existingPath, $existing->sha256)) {
 					$connection->commit(); return array('success' => true, 'row' => $existing);
 				}
-				Capsule::table('journal_payment_documents')->where('document_id', (int) $existing->document_id)->update(array('status' => 'revoked', 'revoked_at' => date('Y-m-d H:i:s')));
+				DB::table('journal_payment_documents')->where('document_id', (int) $existing->document_id)->update(array('status' => 'revoked', 'revoked_at' => date('Y-m-d H:i:s')));
 			}
-			$version = (int) Capsule::table('journal_payment_documents')->where('payment_id', $paymentId)->where('document_type', $type)->max('version_number') + 1;
+			$version = (int) DB::table('journal_payment_documents')->where('payment_id', $paymentId)->where('document_type', $type)->max('version_number') + 1;
 			$dir = $this->protectedDocumentDirectory($contextId);
 			if (!is_dir($dir) && !mkdir($dir, 0750, true) && !is_dir($dir)) throw new Exception('Direktori PDF privat tidak dapat dibuat.');
 			$fileName = $type . '-' . bin2hex(random_bytes(24)) . '.pdf';
 			$path = $dir . DIRECTORY_SEPARATOR . $fileName;
-			$verificationUrl = $request->getDispatcher()->url($request, ROUTE_PAGE, $context->getPath(), 'journalPayment', 'verifyDocument', null, array('type' => $type, 'version' => $version, 'access' => $record->document_access_token));
+			$verificationUrl = $request->getDispatcher()->url($request, Application::ROUTE_PAGE, $context->getPath(), 'journalPayment', 'verifyDocument', null, array('type' => $type, 'version' => $version, 'access' => $record->document_access_token));
 			$data = $this->protectedDocumentData($context, $record, $type, $version, $verificationUrl);
 			$result = $generator->generate($type, $data, $path);
 			if (!$result['success']) throw new Exception($result['error']);
-			$documentId = Capsule::table('journal_payment_documents')->insertGetId(array(
+			$documentId = DB::table('journal_payment_documents')->insertGetId(array(
 				'context_id' => $contextId, 'payment_id' => $paymentId, 'article_id' => (string) $record->article_id,
 				'document_type' => $type, 'document_number' => mb_substr($documentNumber, 0, 96), 'version_number' => $version,
 				'stored_file' => $fileName, 'sha256' => $result['sha256'], 'byte_size' => (int) $result['byteSize'],
@@ -2030,7 +2043,7 @@ class JournalPaymentHandler extends Handler {
 				'issued_at' => $issuedAt, 'created_at' => date('Y-m-d H:i:s'),
 			));
 			$connection->commit(); $started = false;
-			$row = Capsule::table('journal_payment_documents')->where('document_id', $documentId)->first();
+			$row = DB::table('journal_payment_documents')->where('document_id', $documentId)->first();
 			$this->auditLog($contextId, $request, 'protected_pdf_generated', 'protected_document', $documentId, $record->article_id, null, array('type' => $type, 'version' => $version, 'sha256' => $result['sha256'], 'protection' => $result['encryption']), 'PDF server-side dibuat dan dikunci untuk cetak saja.');
 			return array('success' => true, 'row' => $row);
 		} catch (Throwable $e) {
@@ -2084,7 +2097,7 @@ class JournalPaymentHandler extends Handler {
 
 	private function streamProtectedDocument($row, $request) {
 		$path = $this->protectedDocumentDirectory($row->context_id) . DIRECTORY_SEPARATOR . basename((string) $row->stored_file);
-		if (!$this->isValidStoredPdf($path, $row->sha256)) { http_response_code(409); fatalError('Integritas atau struktur PDF gagal diverifikasi. Dokumen tidak dikirim.'); }
+		if (!$this->isValidStoredPdf($path, $row->sha256)) { http_response_code(409); $this->fail('Integritas atau struktur PDF gagal diverifikasi. Dokumen tidak dikirim.'); }
 		// OJS and hosting-level output buffering may prepend whitespace, HTML, or
 		// compressed bytes. Any byte before %PDF corrupts the browser preview.
 		while (ob_get_level() > 0) @ob_end_clean();
@@ -2123,13 +2136,13 @@ class JournalPaymentHandler extends Handler {
 
 	/** Revisions never overwrite issued bytes; the previous version remains auditable. */
 	private function revokeProtectedDocuments($contextId, $paymentId, $request, $types = null, $reason = '') {
-		$query = Capsule::table('journal_payment_documents')->where('context_id', (int) $contextId)->where('payment_id', (int) $paymentId)->where('status', 'active');
+		$query = DB::table('journal_payment_documents')->where('context_id', (int) $contextId)->where('payment_id', (int) $paymentId)->where('status', 'active');
 		if (is_array($types) && $types) $query->whereIn('document_type', $types);
 		$rows = $query->get();
 		if (count($rows) < 1) return;
 		$user = $request ? $request->getUser() : null;
 		foreach ($rows as $row) {
-			Capsule::table('journal_payment_documents')->where('document_id', (int) $row->document_id)->where('status', 'active')->update(array('status' => 'revoked', 'revoked_by' => $user ? (int) $user->getId() : null, 'revoked_at' => date('Y-m-d H:i:s')));
+			DB::table('journal_payment_documents')->where('document_id', (int) $row->document_id)->where('status', 'active')->update(array('status' => 'revoked', 'revoked_by' => $user ? (int) $user->getId() : null, 'revoked_at' => date('Y-m-d H:i:s')));
 			$this->auditLog($contextId, $request, 'protected_pdf_revoked', 'protected_document', $row->document_id, $row->article_id, array('status' => 'active', 'sha256' => $row->sha256), array('status' => 'revoked'), $reason ?: 'Data sumber dokumen berubah.');
 		}
 	}
@@ -2145,7 +2158,7 @@ class JournalPaymentHandler extends Handler {
 		if ($request->getUserVar('jpPreview') === 'fit' && !$request->getUserVar('raw')) {
 			$rawUrl = $request->getDispatcher()->url(
 				$request,
-				ROUTE_PAGE,
+				Application::ROUTE_PAGE,
 				$context->getPath(),
 				'journalPayment',
 				'proof',
@@ -2153,6 +2166,7 @@ class JournalPaymentHandler extends Handler {
 				array('id' => $id, 'raw' => 1)
 			);
 			$templateMgr = TemplateManager::getManager($request);
+			JournalPaymentPlugin::registerTemplateModifiers($templateMgr);
 			$templateMgr->assign(array(
 				'proofUrl' => $rawUrl,
 				'proofName' => $record->proof_name,
@@ -2178,25 +2192,25 @@ class JournalPaymentHandler extends Handler {
 		$proof = null;
 		$payment = null;
 		if (preg_match('/^[a-f0-9]{64}$/', $token) && $this->allowPublicSearch($request, $contextId, 'proofreading_access', 60, 600)) {
-			$proof = Capsule::table('journal_payment_proofs')->where('context_id', $contextId)->where('access_token', $token)->first();
-			if ($proof) $payment = Capsule::table('journal_payment_records')->where('context_id', $contextId)->where('payment_id', (int) $proof->payment_id)->first();
+			$proof = DB::table('journal_payment_proofs')->where('context_id', $contextId)->where('access_token', $token)->first();
+			if ($proof) $payment = DB::table('journal_payment_records')->where('context_id', $contextId)->where('payment_id', (int) $proof->payment_id)->first();
 		}
-		if (!$proof || !$payment) { http_response_code(404); fatalError('Halaman proofreading tidak ditemukan atau tautan tidak valid.'); }
+		if (!$proof || !$payment) { http_response_code(404); $this->fail('Halaman proofreading tidak ditemukan atau tautan tidak valid.'); }
 
 		$result = trim((string) $request->getUserVar('result'));
 		if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-			if (!$request->checkCSRF()) fatalError('Sesi formulir tidak valid. Muat ulang halaman lalu coba kembali.');
+			if (!$request->checkCSRF()) $this->fail('Sesi formulir tidak valid. Muat ulang halaman lalu coba kembali.');
 			$decision = trim((string) $request->getUserVar('decision'));
 			$notes = trim((string) $request->getUserVar('authorNotes'));
 			if (!in_array($decision, array('approved', 'corrections_requested'), true) || ($decision === 'corrections_requested' && $notes === '')) {
 				$result = 'invalid';
 			} else {
-				$connection = Capsule::connection();
+				$connection = DB::connection();
 				$started = false;
 				try {
 					$connection->beginTransaction();
 					$started = true;
-					$current = Capsule::table('journal_payment_proofs')->where('context_id', $contextId)->where('proof_id', (int) $proof->proof_id)->lockForUpdate()->first();
+					$current = DB::table('journal_payment_proofs')->where('context_id', $contextId)->where('proof_id', (int) $proof->proof_id)->lockForUpdate()->first();
 					if (!$current || $current->status !== 'awaiting_author') {
 						$connection->rollBack();
 						$started = false;
@@ -2205,7 +2219,7 @@ class JournalPaymentHandler extends Handler {
 						$user = $request->getUser();
 						$responderName = $user ? $user->getFullName() : $payment->payer_name;
 						$now = date('Y-m-d H:i:s');
-						Capsule::table('journal_payment_proofs')->where('proof_id', (int) $proof->proof_id)->update(array(
+						DB::table('journal_payment_proofs')->where('proof_id', (int) $proof->proof_id)->update(array(
 							'status' => $decision,
 							'author_notes' => mb_substr($notes, 0, 10000),
 							'responded_by' => $user ? (int) $user->getId() : null,
@@ -2229,7 +2243,7 @@ class JournalPaymentHandler extends Handler {
 					$result = 'failed';
 				}
 			}
-			$proof = Capsule::table('journal_payment_proofs')->where('proof_id', (int) $proof->proof_id)->first();
+			$proof = DB::table('journal_payment_proofs')->where('proof_id', (int) $proof->proof_id)->first();
 		}
 
 		$this->sendSecureDocumentHeaders();
@@ -2239,7 +2253,7 @@ class JournalPaymentHandler extends Handler {
 			'record' => $payment,
 			'proofreadingStatusLabel' => $this->proofreadingStatusLabel($proof->status),
 			'proofreadingResult' => $result,
-			'proofreadingFileUrl' => $request->getDispatcher()->url($request, ROUTE_PAGE, $context->getPath(), 'journalPayment', 'proofreadingFile', null, array('access' => $token)),
+			'proofreadingFileUrl' => $request->getDispatcher()->url($request, Application::ROUTE_PAGE, $context->getPath(), 'journalPayment', 'proofreadingFile', null, array('access' => $token)),
 		));
 		$templateMgr->display(self::$plugin->getTemplateResource('proofreading.tpl'));
 	}
@@ -2252,11 +2266,11 @@ class JournalPaymentHandler extends Handler {
 		$id = (int) $request->getUserVar('id');
 		$proof = null;
 		if (preg_match('/^[a-f0-9]{64}$/', $token)) {
-			$proof = Capsule::table('journal_payment_proofs')->where('context_id', $contextId)->where('access_token', $token)->first();
+			$proof = DB::table('journal_payment_proofs')->where('context_id', $contextId)->where('access_token', $token)->first();
 		} elseif ($id > 0) {
 			$user = $request->getUser();
 			if ($user) {
-				$candidate = Capsule::table('journal_payment_proofs')->where('context_id', $contextId)->where('proof_id', $id)->first();
+				$candidate = DB::table('journal_payment_proofs')->where('context_id', $contextId)->where('proof_id', $id)->first();
 				$payment = $candidate ? $this->findAccessiblePayment($contextId, (int) $candidate->payment_id, $user) : null;
 				if ($payment) $proof = $candidate;
 			}
@@ -2274,7 +2288,7 @@ class JournalPaymentHandler extends Handler {
 
 	private function requireContext($request) {
 		$context = $request->getContext();
-		if (!$context) fatalError('Halaman pembayaran harus dibuka dari konteks sebuah jurnal.');
+		if (!$context) $this->fail('Halaman pembayaran harus dibuka dari konteks sebuah jurnal.');
 		$this->ensureSchema($context->getId());
 		return $context;
 	}
@@ -2286,14 +2300,13 @@ class JournalPaymentHandler extends Handler {
 	private function ensureSchema($contextId) {
 		static $ready = false;
 		if ($ready) return;
-		if ((string) self::$plugin->getSetting((int) $contextId, 'schemaReady') === '1.28.0') {
+		if ((string) self::$plugin->getSetting((int) $contextId, 'schemaReady') === '2.0.0') {
 			$ready = true;
 			return;
 		}
-		self::$plugin->import('JournalPaymentSchemaMigration');
 		$migration = new JournalPaymentSchemaMigration();
 		$migration->up();
-		self::$plugin->updateSetting((int) $contextId, 'schemaReady', '1.28.0', 'string');
+		self::$plugin->updateSetting((int) $contextId, 'schemaReady', '2.0.0', 'string');
 		$ready = true;
 	}
 
@@ -2305,7 +2318,7 @@ class JournalPaymentHandler extends Handler {
 			exit;
 		}
 		$isPaymentStaff = $this->canManagePaymentRecords($user, $context->getId()) || $this->isProductionEditor($user, $context->getId());
-		if (!$isPaymentStaff) fatalError('Anda tidak memiliki hak untuk mengelola pembayaran jurnal ini.');
+		if (!$isPaymentStaff) $this->fail('Anda tidak memiliki hak untuk mengelola pembayaran jurnal ini.');
 		return $context;
 	}
 
@@ -2314,15 +2327,15 @@ class JournalPaymentHandler extends Handler {
 	}
 
 	private function canManagePaymentRecords($user, $contextId) {
-		return $user && ($this->isFullPaymentManager($user, $contextId) || $user->hasRole(array(ROLE_ID_MANAGER, ROLE_ID_SUB_EDITOR), (int) $contextId));
+		return $user && ($this->isFullPaymentManager($user, $contextId) || $user->hasRole(array(Role::ROLE_ID_MANAGER, Role::ROLE_ID_SUB_EDITOR), (int) $contextId));
 	}
 
 	/** Production Editor is an Assistant user group enabled for OJS Production stage. */
 	private function isProductionEditor($user, $contextId) {
 		if (!$user) return false;
-		if (Capsule::schema()->hasTable('journal_payment_production_fees') && Capsule::table('journal_payment_production_fees')->where('context_id', (int) $contextId)->where('production_editor_user_id', (int) $user->getId())->exists()) return true;
-		$productionStage = defined('WORKFLOW_STAGE_ID_PRODUCTION') ? constant('WORKFLOW_STAGE_ID_PRODUCTION') : 5;
-		return Capsule::table('stage_assignments as sa')
+		if (Schema::hasTable('journal_payment_production_fees') && DB::table('journal_payment_production_fees')->where('context_id', (int) $contextId)->where('production_editor_user_id', (int) $user->getId())->exists()) return true;
+		$productionStage = WORKFLOW_STAGE_ID_PRODUCTION;
+		return DB::table('stage_assignments as sa')
 			->join('user_groups as ug', 'ug.user_group_id', '=', 'sa.user_group_id')
 			->join('user_group_settings as ugn', function ($join) {
 				$join->on('ugn.user_group_id', '=', 'ug.user_group_id')->where('ugn.setting_name', '=', 'name');
@@ -2335,7 +2348,7 @@ class JournalPaymentHandler extends Handler {
 			->join('submissions as s', 's.submission_id', '=', 'sa.submission_id')
 			->where('sa.user_id', (int) $user->getId())
 			->where('ug.context_id', (int) $contextId)
-			->where('ug.role_id', defined('ROLE_ID_ASSISTANT') ? constant('ROLE_ID_ASSISTANT') : 4097)
+			->where('ug.role_id', Role::ROLE_ID_ASSISTANT)
 			->where(function ($name) { $name->whereRaw("LOWER(ugn.setting_value) LIKE '%production%editor%'")->orWhereRaw("LOWER(ugn.setting_value) LIKE '%editor%produksi%'"); })
 			->where('s.context_id', (int) $contextId)
 			->exists();
@@ -2344,9 +2357,9 @@ class JournalPaymentHandler extends Handler {
 	/** Null means unrestricted manager access; an array restricts an editor to OJS assignments. */
 	private function getAccessibleSubmissionIds($contextId, $user) {
 		if ($this->isFullPaymentManager($user, $contextId)) return null;
-		$productionStage = defined('WORKFLOW_STAGE_ID_PRODUCTION') ? constant('WORKFLOW_STAGE_ID_PRODUCTION') : 5;
-		$assistantRole = defined('ROLE_ID_ASSISTANT') ? constant('ROLE_ID_ASSISTANT') : 4097;
-		$rows = Capsule::table('stage_assignments as sa')
+		$productionStage = WORKFLOW_STAGE_ID_PRODUCTION;
+		$assistantRole = Role::ROLE_ID_ASSISTANT;
+		$rows = DB::table('stage_assignments as sa')
 			->join('user_groups as ug', 'ug.user_group_id', '=', 'sa.user_group_id')
 			->leftJoin('user_group_settings as ugn', function ($join) {
 				$join->on('ugn.user_group_id', '=', 'ug.user_group_id')
@@ -2362,7 +2375,7 @@ class JournalPaymentHandler extends Handler {
 			->where('ug.context_id', (int) $contextId)
 			->where('s.context_id', (int) $contextId)
 			->where(function ($roles) use ($assistantRole) {
-				$roles->whereIn('ug.role_id', array(ROLE_ID_MANAGER, ROLE_ID_SUB_EDITOR))
+				$roles->whereIn('ug.role_id', array(Role::ROLE_ID_MANAGER, Role::ROLE_ID_SUB_EDITOR))
 					->orWhere(function ($production) use ($assistantRole) {
 						$production->where('ug.role_id', $assistantRole)->whereNotNull('ugs.user_group_id')
 							->where(function ($name) { $name->whereRaw("LOWER(ugn.setting_value) LIKE '%production%editor%'")->orWhereRaw("LOWER(ugn.setting_value) LIKE '%editor%produksi%'"); });
@@ -2377,7 +2390,7 @@ class JournalPaymentHandler extends Handler {
 	}
 
 	private function findAccessiblePayment($contextId, $paymentId, $user) {
-		$record = Capsule::table('journal_payment_records')
+		$record = DB::table('journal_payment_records')
 			->where('context_id', (int) $contextId)
 			->where('payment_id', (int) $paymentId)
 			->first();
@@ -2387,37 +2400,27 @@ class JournalPaymentHandler extends Handler {
 	}
 
 	private function getAssignedEditorLabel($submissionId) {
-		$stageAssignmentDao = DAORegistry::getDAO('StageAssignmentDAO');
-		$userDao = DAORegistry::getDAO('UserDAO');
-		$names = array();
-		foreach (array(ROLE_ID_MANAGER, ROLE_ID_SUB_EDITOR) as $roleId) {
-			$assignments = $stageAssignmentDao->getBySubmissionAndRoleId((int) $submissionId, $roleId);
-			while ($assignment = $assignments->next()) {
-				$user = $userDao->getById($assignment->getUserId());
-				if ($user) $names[$user->getId()] = $user->getFullName();
-			}
-		}
-		return $names ? implode(', ', array_values($names)) : 'Belum ditugaskan';
+		$labels = $this->getAssignedEditorLabels(array((int) $submissionId));
+		return isset($labels[(int) $submissionId]) ? $labels[(int) $submissionId] : 'Belum ditugaskan';
 	}
 
 	/** Resolve editor labels for one dashboard page without per-submission assignment queries. */
 	private function getAssignedEditorLabels($submissionIds) {
 		$ids = array_values(array_unique(array_filter(array_map('intval', $submissionIds))));
 		if (!$ids) return array();
-		$rows = Capsule::table('stage_assignments as sa')
+		$rows = DB::table('stage_assignments as sa')
 			->join('user_groups as ug', 'ug.user_group_id', '=', 'sa.user_group_id')
 			->whereIn('sa.submission_id', $ids)
-			->whereIn('ug.role_id', array(ROLE_ID_MANAGER, ROLE_ID_SUB_EDITOR))
+			->whereIn('ug.role_id', array(Role::ROLE_ID_MANAGER, Role::ROLE_ID_SUB_EDITOR))
 			->select('sa.submission_id', 'sa.user_id')
 			->distinct()
 			->get();
 
 		$userIds = array();
 		foreach ($rows as $row) $userIds[(int) $row->user_id] = true;
-		$userDao = DAORegistry::getDAO('UserDAO');
 		$userNames = array();
 		foreach (array_keys($userIds) as $userId) {
-			$user = $userDao->getById($userId);
+			$user = $this->getUserById($userId);
 			if ($user) $userNames[$userId] = $user->getFullName();
 		}
 
@@ -2437,6 +2440,7 @@ class JournalPaymentHandler extends Handler {
 		$this->setupTemplate($request);
 		$context = $request->getContext();
 		$templateMgr = TemplateManager::getManager($request);
+		JournalPaymentPlugin::registerTemplateModifiers($templateMgr);
 		$assetVersion = self::$plugin->getAssetVersion();
 		$templateMgr->addStyleSheet('journalPayment', self::$plugin->getAssetUrl($request) . '/styles/payment.css?v=' . $assetVersion);
 		$templateMgr->addJavaScript('journalPayment', self::$plugin->getAssetUrl($request) . '/js/payment.js?v=' . $assetVersion, array('contexts' => array('frontend')));
@@ -2468,7 +2472,7 @@ class JournalPaymentHandler extends Handler {
 		$articleId = trim((string) $articleId);
 		if ($articleId === '' || !ctype_digit($articleId) || strlen($articleId) > 20) return null;
 		try {
-			$submission = Services::get('submission')->get((int) $articleId);
+			$submission = Repo::submission()->get((int) $articleId);
 		} catch (Exception $e) {
 			return null;
 		}
@@ -2477,8 +2481,10 @@ class JournalPaymentHandler extends Handler {
 		if (!$publication) return null;
 
 		$author = $publication->getPrimaryAuthor();
-		$authors = (array) $publication->getData('authors');
-		if (!$author && !empty($authors)) $author = reset($authors);
+		if (!$author) {
+			$authors = $publication->getData('authors');
+			if ($authors) foreach ($authors as $candidateAuthor) { $author = $candidateAuthor; break; }
+		}
 
 		return array(
 			'articleId' => (string) $submission->getId(),
@@ -2530,7 +2536,7 @@ class JournalPaymentHandler extends Handler {
 
 		$publicationByArticle = array();
 		$publicationIds = array();
-		foreach (Capsule::table('submissions')
+		foreach (DB::table('submissions')
 			->where('context_id', (int) $contextId)
 			->whereIn('submission_id', array_keys($pendingByArticle))
 			->select('submission_id', 'current_publication_id')
@@ -2544,20 +2550,14 @@ class JournalPaymentHandler extends Handler {
 
 		$issueByPublication = array();
 		$issueIds = array();
-		foreach (Capsule::table('publication_settings')
-			->whereIn('publication_id', array_keys($publicationIds))
-			->where('setting_name', 'issueId')
-			->select('publication_id', 'setting_value')
-			->get() as $setting) {
-			$issueId = (int) $setting->setting_value;
-			if (!$issueId) continue;
-			$issueByPublication[(int) $setting->publication_id] = $issueId;
-			$issueIds[$issueId] = true;
+		foreach ($this->issueIdsByPublication(array_keys($publicationIds)) as $publicationId => $issueId) {
+			$issueByPublication[(int) $publicationId] = (int) $issueId;
+			$issueIds[(int) $issueId] = true;
 		}
 		if (!$issueIds) return;
 
 		$issues = array();
-		foreach (Capsule::table('issues')
+		foreach (DB::table('issues')
 			->where('journal_id', (int) $contextId)
 			->whereIn('issue_id', array_keys($issueIds))
 			->select('issue_id', 'volume', 'number', 'year')
@@ -2593,17 +2593,15 @@ class JournalPaymentHandler extends Handler {
 		if (!empty($record->issue_volume) && !empty($record->issue_number) && !empty($record->issue_year)) return;
 		if (!ctype_digit((string) $record->article_id)) return;
 		try {
-			$publicationId = Capsule::table('submissions')
+			$publicationId = DB::table('submissions')
 				->where('context_id', (int) $contextId)
 				->where('submission_id', (int) $record->article_id)
 				->value('current_publication_id');
 			if (!$publicationId) return;
-			$issueId = Capsule::table('publication_settings')
-				->where('publication_id', (int) $publicationId)
-				->where('setting_name', 'issueId')
-				->value('setting_value');
+			$issueMap = $this->issueIdsByPublication(array((int) $publicationId));
+			$issueId = isset($issueMap[(int) $publicationId]) ? $issueMap[(int) $publicationId] : 0;
 			if (!$issueId) return;
-			$issue = Capsule::table('issues')
+			$issue = DB::table('issues')
 				->where('journal_id', (int) $contextId)
 				->where('issue_id', (int) $issueId)
 				->first();
@@ -2641,7 +2639,7 @@ class JournalPaymentHandler extends Handler {
 	private function getExistingPayment($contextId, $articleId) {
 		$articleId = trim((string) $articleId);
 		if ($articleId === '' || !ctype_digit($articleId)) return null;
-		return Capsule::table('journal_payment_records')
+		return DB::table('journal_payment_records')
 			->where('context_id', (int) $contextId)
 			->where('article_id', $articleId)
 			->orderBy('created_at', 'desc')
@@ -2650,11 +2648,11 @@ class JournalPaymentHandler extends Handler {
 
 	private function isSubmissionPublished($contextId, $articleId) {
 		if (!ctype_digit((string) $articleId)) return false;
-		$status = Capsule::table('submissions')
+		$status = DB::table('submissions')
 			->where('context_id', (int) $contextId)
 			->where('submission_id', (int) $articleId)
 			->value('status');
-		$publishedStatus = defined('STATUS_PUBLISHED') ? constant('STATUS_PUBLISHED') : 3;
+		$publishedStatus = Submission::STATUS_PUBLISHED;
 		return $status !== null && (int) $status === (int) $publishedStatus;
 	}
 
@@ -2667,19 +2665,19 @@ class JournalPaymentHandler extends Handler {
 	/** Persistent, privacy-preserving limiter shared across browser sessions. */
 	private function allowPublicSearch($request, $contextId, $scope, $limit, $windowSeconds) {
 		$user = $request->getUser();
-		if ($user && ($user->hasRole(array(ROLE_ID_SITE_ADMIN), CONTEXT_SITE) || $user->hasRole(array(ROLE_ID_MANAGER, ROLE_ID_SUB_EDITOR), (int) $contextId))) return true;
+		if ($user && ($user->hasRole(array(Role::ROLE_ID_SITE_ADMIN), Application::SITE_CONTEXT_ID) || $user->hasRole(array(Role::ROLE_ID_MANAGER, Role::ROLE_ID_SUB_EDITOR), (int) $contextId))) return true;
 		$ip = isset($_SERVER['REMOTE_ADDR']) ? (string) $_SERVER['REMOTE_ADDR'] : 'unknown';
 		$agent = isset($_SERVER['HTTP_USER_AGENT']) ? mb_substr((string) $_SERVER['HTTP_USER_AGENT'], 0, 500) : '';
 		$key = (string) Config::getVar('security', 'salt');
 		if ($key === '') $key = (string) Config::getVar('general', 'base_url');
 		$clientHash = hash_hmac('sha256', $ip . '|' . $agent, $key !== '' ? $key : 'journal-payment');
 		$now = time();
-		$connection = Capsule::connection();
+		$connection = DB::connection();
 		$started = false;
 		try {
 			$connection->beginTransaction();
 			$started = true;
-			$row = Capsule::table('journal_payment_rate_limits')->where('context_id', (int) $contextId)->where('scope', $scope)->where('client_hash', $clientHash)->lockForUpdate()->first();
+			$row = DB::table('journal_payment_rate_limits')->where('context_id', (int) $contextId)->where('scope', $scope)->where('client_hash', $clientHash)->lockForUpdate()->first();
 			if ($row && !empty($row->blocked_until) && strtotime($row->blocked_until) > $now) {
 				$connection->commit();
 				return false;
@@ -2693,8 +2691,8 @@ class JournalPaymentHandler extends Handler {
 				'blocked_until' => $blocked ? date('Y-m-d H:i:s', $now + $windowSeconds) : null,
 				'updated_at' => date('Y-m-d H:i:s', $now),
 			);
-			if ($row) Capsule::table('journal_payment_rate_limits')->where('rate_limit_id', (int) $row->rate_limit_id)->update($data);
-			else Capsule::table('journal_payment_rate_limits')->insert(array_merge($data, array('context_id' => (int) $contextId, 'scope' => mb_substr($scope, 0, 40), 'client_hash' => $clientHash)));
+			if ($row) DB::table('journal_payment_rate_limits')->where('rate_limit_id', (int) $row->rate_limit_id)->update($data);
+			else DB::table('journal_payment_rate_limits')->insert(array_merge($data, array('context_id' => (int) $contextId, 'scope' => mb_substr($scope, 0, 40), 'client_hash' => $clientHash)));
 			$connection->commit();
 			return !$blocked;
 		} catch (Throwable $e) {
@@ -2706,7 +2704,7 @@ class JournalPaymentHandler extends Handler {
 
 	private function newDocumentAccessToken() {
 		do { $token = bin2hex(random_bytes(32)); }
-		while (Capsule::table('journal_payment_records')->where('document_access_token', $token)->exists());
+		while (DB::table('journal_payment_records')->where('document_access_token', $token)->exists());
 		return $token;
 	}
 
@@ -2722,8 +2720,8 @@ class JournalPaymentHandler extends Handler {
 	private function ensureDocumentAccessToken($contextId, $record) {
 		if (!$record || !empty($record->document_access_token)) return;
 		$token = $this->newDocumentAccessToken();
-		Capsule::table('journal_payment_records')->where('context_id', (int) $contextId)->where('payment_id', (int) $record->payment_id)->whereNull('document_access_token')->update(array('document_access_token' => $token));
-		$stored = Capsule::table('journal_payment_records')->where('context_id', (int) $contextId)->where('payment_id', (int) $record->payment_id)->value('document_access_token');
+		DB::table('journal_payment_records')->where('context_id', (int) $contextId)->where('payment_id', (int) $record->payment_id)->whereNull('document_access_token')->update(array('document_access_token' => $token));
+		$stored = DB::table('journal_payment_records')->where('context_id', (int) $contextId)->where('payment_id', (int) $record->payment_id)->value('document_access_token');
 		$record->document_access_token = $stored ?: $token;
 	}
 
@@ -2732,7 +2730,7 @@ class JournalPaymentHandler extends Handler {
 		$stored = isset($record->document_access_token) ? (string) $record->document_access_token : '';
 		if ($stored !== '' && strlen($stored) === 64 && strlen((string) $token) === 64 && hash_equals($stored, (string) $token)) return true;
 		$user = $request->getUser();
-		if (!$user || !$user->hasRole(array(ROLE_ID_SITE_ADMIN), CONTEXT_SITE) && !$user->hasRole(array(ROLE_ID_MANAGER, ROLE_ID_SUB_EDITOR), (int) $contextId)) return false;
+		if (!$user || !$user->hasRole(array(Role::ROLE_ID_SITE_ADMIN), Application::SITE_CONTEXT_ID) && !$user->hasRole(array(Role::ROLE_ID_MANAGER, Role::ROLE_ID_SUB_EDITOR), (int) $contextId)) return false;
 		return (bool) $this->findAccessiblePayment($contextId, (int) $record->payment_id, $user);
 	}
 
@@ -2746,7 +2744,7 @@ class JournalPaymentHandler extends Handler {
 	private function auditLog($contextId, $request, $action, $entityType, $entityId, $articleId, $oldValues = null, $newValues = null, $notes = null) {
 		try {
 			$user = $request ? $request->getUser() : null;
-			Capsule::table('journal_payment_audit_logs')->insert(array(
+			DB::table('journal_payment_audit_logs')->insert(array(
 				'context_id' => (int) $contextId,
 				'actor_user_id' => $user ? (int) $user->getId() : null,
 				'actor_name' => mb_substr($user ? $user->getFullName() : ($request ? 'Publik/Penulis' : 'Sistem Otomatis'), 0, 255),
@@ -2765,11 +2763,12 @@ class JournalPaymentHandler extends Handler {
 	private function sendAndLogEmail($mail, $contextId, $record, $emailType, $subject, $request) {
 		$sent = false;
 		$error = null;
-		try { $sent = (bool) $mail->send(); }
+		try { $sent = $this->dispatchMail($mail); }
 		catch (Throwable $e) { $error = $e->getMessage(); error_log('Journal Payment email failed: ' . $error); }
+		if (!$sent && $error === null) $error = 'Mailer OJS tidak mengonfirmasi pengiriman. Periksa konfigurasi SMTP dan log error server.';
 		try {
 			$user = $request ? $request->getUser() : null;
-			Capsule::table('journal_payment_email_logs')->insert(array(
+			DB::table('journal_payment_email_logs')->insert(array(
 				'context_id' => (int) $contextId,
 				'payment_id' => isset($record->payment_id) ? (int) $record->payment_id : null,
 				'article_id' => isset($record->article_id) ? mb_substr((string) $record->article_id, 0, 64) : null,
@@ -2786,14 +2785,14 @@ class JournalPaymentHandler extends Handler {
 	}
 
 	private function getAuditDashboardData($contextId) {
-		$audits = Capsule::table('journal_payment_audit_logs')->where('context_id', (int) $contextId)->orderBy('created_at', 'desc')->orderBy('audit_id', 'desc')->limit(150)->get();
+		$audits = DB::table('journal_payment_audit_logs')->where('context_id', (int) $contextId)->orderBy('created_at', 'desc')->orderBy('audit_id', 'desc')->limit(150)->get();
 		$labels = array('payment_created' => 'Pembayaran dibuat', 'schedule_changed' => 'Jadwal berubah', 'payment_updated' => 'Data diubah', 'payment_deleted' => 'Pembayaran dihapus', 'payment_status_changed' => 'Status pembayaran', 'document_issued' => 'Dokumen diterbitkan', 'protected_pdf_generated' => 'PDF terlindungi dibuat', 'protected_pdf_revoked' => 'Versi PDF dicabut', 'document_integrity_failed' => 'Integritas PDF gagal', 'remittance_uploaded' => 'Setoran diunggah', 'remittance_verified' => 'Setoran diverifikasi', 'remittance_rejected' => 'Setoran ditolak', 'drive_folder_created' => 'Folder GD dibuat', 'drive_file_uploaded' => 'File GD diunggah', 'drive_file_renamed' => 'File GD diubah', 'drive_file_trashed' => 'File GD dihapus', 'proof_uploaded' => 'Galley akhir diunggah', 'proof_approved' => 'Galley disetujui penulis', 'proof_correction_requested' => 'Koreksi galley diajukan', 'production_fee_created' => 'Fee Production Editor dibuat', 'production_fee_updated' => 'Fee Production Editor diubah', 'production_payout_created' => 'Fee Production Editor dibayar', 'production_payout_received' => 'Fee dikonfirmasi diterima');
 		foreach ($audits as $row) {
 			$row->action_label = isset($labels[$row->action]) ? $labels[$row->action] : ucwords(str_replace('_', ' ', $row->action));
 			$row->old_display = $this->formatAuditValues($row->old_values);
 			$row->new_display = $this->formatAuditValues($row->new_values);
 		}
-		$emails = Capsule::table('journal_payment_email_logs')->where('context_id', (int) $contextId)->orderBy('created_at', 'desc')->orderBy('email_log_id', 'desc')->limit(150)->get();
+		$emails = DB::table('journal_payment_email_logs')->where('context_id', (int) $contextId)->orderBy('created_at', 'desc')->orderBy('email_log_id', 'desc')->limit(150)->get();
 		return array('auditLogs' => $audits, 'emailLogs' => $emails);
 	}
 
@@ -2861,17 +2860,17 @@ class JournalPaymentHandler extends Handler {
 			$this->redirectManagerDashboard($request, array('proofResult' => 'failed'));
 			return;
 		}
-		$connection = Capsule::connection();
+		$connection = DB::connection();
 		$started = false;
 		try {
 			$connection->beginTransaction();
 			$started = true;
-			$latest = Capsule::table('journal_payment_proofs')->where('context_id', $contextId)->where('payment_id', $paymentId)->orderBy('version_number', 'desc')->lockForUpdate()->first();
+			$latest = DB::table('journal_payment_proofs')->where('context_id', $contextId)->where('payment_id', $paymentId)->orderBy('version_number', 'desc')->lockForUpdate()->first();
 			$version = $latest ? (int) $latest->version_number + 1 : 1;
-			Capsule::table('journal_payment_proofs')->where('context_id', $contextId)->where('payment_id', $paymentId)->whereIn('status', array('awaiting_author', 'corrections_requested'))->update(array('status' => 'superseded', 'updated_at' => date('Y-m-d H:i:s')));
+			DB::table('journal_payment_proofs')->where('context_id', $contextId)->where('payment_id', $paymentId)->whereIn('status', array('awaiting_author', 'corrections_requested'))->update(array('status' => 'superseded', 'updated_at' => date('Y-m-d H:i:s')));
 			$token = $this->newProofreadingAccessToken();
 			$now = date('Y-m-d H:i:s');
-			$proofId = Capsule::table('journal_payment_proofs')->insertGetId(array(
+			$proofId = DB::table('journal_payment_proofs')->insertGetId(array(
 				'context_id' => $contextId,
 				'payment_id' => $paymentId,
 				'article_id' => mb_substr((string) $record->article_id, 0, 64),
@@ -2889,7 +2888,7 @@ class JournalPaymentHandler extends Handler {
 			));
 			$connection->commit();
 			$started = false;
-			$proof = Capsule::table('journal_payment_proofs')->where('proof_id', $proofId)->first();
+			$proof = DB::table('journal_payment_proofs')->where('proof_id', $proofId)->first();
 			$this->auditLog($contextId, $request, 'proof_uploaded', 'proofreading', $proofId, $record->article_id, $latest ? array('version' => (int) $latest->version_number, 'status' => $latest->status) : null,
 				array('version' => $version, 'status' => 'awaiting_author', 'file_name' => basename((string) $file['name']), 'editor_notes' => $notes), 'Galley akhir diunggah dan dikirim untuk persetujuan penulis.');
 			$sent = $this->sendProofreadingInvitation($request, $context, $record, $proof);
@@ -2927,12 +2926,12 @@ class JournalPaymentHandler extends Handler {
 
 	private function newProofreadingAccessToken() {
 		do { $token = bin2hex(random_bytes(32)); }
-		while (Capsule::table('journal_payment_proofs')->where('access_token', $token)->exists());
+		while (DB::table('journal_payment_proofs')->where('access_token', $token)->exists());
 		return $token;
 	}
 
 	private function latestProofForPayment($contextId, $paymentId) {
-		return Capsule::table('journal_payment_proofs')->where('context_id', (int) $contextId)->where('payment_id', (int) $paymentId)->orderBy('version_number', 'desc')->first();
+		return DB::table('journal_payment_proofs')->where('context_id', (int) $contextId)->where('payment_id', (int) $paymentId)->orderBy('version_number', 'desc')->first();
 	}
 
 	private function latestProofsByPayment($contextId, $paymentIds) {
@@ -2941,7 +2940,7 @@ class JournalPaymentHandler extends Handler {
 		$ids = array_values(array_unique(array_filter(array_map('intval', $paymentIds))));
 		if (!$ids) return array();
 		$map = array();
-		foreach (Capsule::table('journal_payment_proofs')->where('context_id', (int) $contextId)->whereIn('payment_id', $ids)->orderBy('version_number', 'desc')->get() as $proof) {
+		foreach (DB::table('journal_payment_proofs')->where('context_id', (int) $contextId)->whereIn('payment_id', $ids)->orderBy('version_number', 'desc')->get() as $proof) {
 			if (!isset($map[(int) $proof->payment_id])) $map[(int) $proof->payment_id] = $proof;
 		}
 		return $map;
@@ -2957,7 +2956,7 @@ class JournalPaymentHandler extends Handler {
 		$contactEmail = trim((string) $context->getData('contactEmail'));
 		$contactName = trim((string) $context->getData('contactName'));
 		if (!filter_var($contactEmail, FILTER_VALIDATE_EMAIL)) return false;
-		$url = $request->getDispatcher()->url($request, ROUTE_PAGE, $context->getPath(), 'journalPayment', 'proofreading', null, array('access' => $proof->access_token));
+		$url = $request->getDispatcher()->url($request, Application::ROUTE_PAGE, $context->getPath(), 'journalPayment', 'proofreading', null, array('access' => $proof->access_token));
 		$escape = function ($value) { return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8'); };
 		$subject = 'Persetujuan Galley Akhir - ID Artikel ' . $record->article_id . ' - Versi ' . $proof->version_number;
 		$body = '<p>Yth. ' . $escape($record->payer_name) . ',</p>'
@@ -2965,12 +2964,11 @@ class JournalPaymentHandler extends Handler {
 			. (!empty($proof->editor_notes) ? '<p>Catatan editor: ' . nl2br($escape($proof->editor_notes)) . '</p>' : '')
 			. '<p>Silakan periksa seluruh PDF, kemudian pilih <strong>Setujui untuk Diterbitkan</strong> atau <strong>Ajukan Koreksi</strong> melalui tautan aman berikut:<br><a href="' . $escape($url) . '">' . $escape($url) . '</a></p>'
 			. '<p>Jangan membagikan tautan ini karena berfungsi sebagai akses pribadi ke galley artikel.</p><p>Hormat kami,<br>' . $escape($context->getLocalizedName()) . '</p>';
-		import('lib.pkp.classes.mail.Mail');
-		$mail = new Mail();
-		$mail->setFrom($contactEmail, $contactName !== '' ? $contactName : $context->getLocalizedName());
-		$mail->addRecipient($record->payer_email, $record->payer_name);
-		$mail->setSubject($subject);
-		$mail->setBody($body);
+		$mail = new Mailable();
+		$mail->from($contactEmail, $contactName !== '' ? $contactName : $context->getLocalizedName());
+		$mail->to($record->payer_email, $record->payer_name);
+		$mail->subject($subject);
+		$mail->body($body);
 		return $this->sendAndLogEmail($mail, (int) $context->getId(), $record, 'proofreading_invitation', $subject, $request);
 	}
 
@@ -3014,12 +3012,83 @@ class JournalPaymentHandler extends Handler {
 	private function newTrackingCode() {
 		do {
 			$code = 'JP-' . date('ymd') . '-' . strtoupper(bin2hex(random_bytes(3)));
-		} while (Capsule::table('journal_payment_records')->where('tracking_code', $code)->exists());
+		} while (DB::table('journal_payment_records')->where('tracking_code', $code)->exists());
 		return $code;
 	}
 
 	private function receiptNumber($context, $id) {
 		$abbr = strtoupper(preg_replace('/[^A-Za-z0-9]/', '', (string) $context->getPath()));
 		return 'JP/' . ($abbr ?: 'OJS') . '/' . date('Y') . '/' . str_pad((string) $id, 6, '0', STR_PAD_LEFT);
+	}
+
+	/**
+	 * Replacement for the global fatalError() removed in OJS 3.4+.
+	 * Output is escaped and the request stops, matching the previous behaviour.
+	 */
+	private function fail($message, $httpCode = 400) {
+		if (!headers_sent()) {
+			http_response_code((int) $httpCode >= 400 ? (int) $httpCode : 400);
+			header('Content-Type: text/html; charset=UTF-8');
+		}
+		echo '<!DOCTYPE html><html lang="id"><head><meta charset="utf-8"><title>Pembayaran Jurnal</title></head><body><p>'
+			. htmlspecialchars((string) $message, ENT_QUOTES, 'UTF-8') . '</p></body></html>';
+		exit;
+	}
+
+	/** Load an OJS user through the 3.5 repository API. */
+	private function getUserById($userId) {
+		$userId = (int) $userId;
+		if ($userId < 1) return null;
+		try {
+			return Repo::user()->get($userId, true);
+		} catch (Throwable $e) {
+			return null;
+		}
+	}
+
+	/** Recommendations are stored as edit decisions but do not change the workflow state. */
+	private function recommendationDecisions() {
+		return array(
+			Decision::RECOMMEND_ACCEPT,
+			Decision::RECOMMEND_PENDING_REVISIONS,
+			Decision::RECOMMEND_RESUBMIT,
+			Decision::RECOMMEND_DECLINE,
+			Decision::RECOMMEND_EXTERNAL_REVIEW,
+		);
+	}
+
+	private function recommendationDecisionSql() {
+		return implode(', ', array_map('intval', $this->recommendationDecisions()));
+	}
+
+	/** OJS 3.4+ stores the assigned issue in publications.issue_id. */
+	private function issueIdsByPublication($publicationIds) {
+		$ids = array_values(array_unique(array_filter(array_map('intval', (array) $publicationIds))));
+		if (!$ids) return array();
+		$result = array();
+		foreach (DB::table('publications')->whereIn('publication_id', $ids)->whereNotNull('issue_id')->select('publication_id', 'issue_id')->get() as $row) {
+			if ((int) $row->issue_id > 0) $result[(int) $row->publication_id] = (int) $row->issue_id;
+		}
+		return $result;
+	}
+
+	/** @var int Number of messages the OJS mailer confirmed as handed to the transport. */
+	private static $mailSentCounter = 0;
+	private static $mailListenerRegistered = false;
+
+	/**
+	 * OJS 3.5 swallows SMTP transport errors, so success is detected through
+	 * Laravel's MessageSent event instead of a boolean return value.
+	 */
+	private function dispatchMail(Mailable $mail) {
+		if (!self::$mailListenerRegistered) {
+			Event::listen(MessageSent::class, function () {
+				self::$mailSentCounter++;
+			});
+			self::$mailListenerRegistered = true;
+		}
+		$before = self::$mailSentCounter;
+		Mail::send($mail);
+		return self::$mailSentCounter > $before;
 	}
 }

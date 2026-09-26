@@ -1,8 +1,22 @@
 <?php
 
-import('lib.pkp.classes.form.Form');
+/**
+ * @file JournalPaymentSettingsForm.php
+ * @brief Journal-level settings for Journal Payment (OJS 3.5).
+ */
 
-use Illuminate\Database\Capsule\Manager as Capsule;
+namespace APP\plugins\generic\journalPayment;
+
+use APP\core\Application;
+use APP\facades\Repo;
+use APP\notification\NotificationManager;
+use APP\template\TemplateManager;
+use Illuminate\Support\Facades\DB;
+use PKP\form\Form;
+use PKP\form\validation\FormValidatorCSRF;
+use PKP\form\validation\FormValidatorPost;
+use PKP\notification\Notification;
+use PKP\security\Role;
 
 class JournalPaymentSettingsForm extends Form {
 	public $plugin;
@@ -216,11 +230,10 @@ class JournalPaymentSettingsForm extends Form {
 		} elseif ($this->pendingDriveCredentials) {
 			$this->plugin->saveGoogleDriveCredentials($contextId, $this->pendingDriveCredentials);
 		}
-		import('classes.notification.NotificationManager');
 		$notificationMgr = new NotificationManager();
 		$notificationMgr->createTrivialNotification(
 			Application::get()->getRequest()->getUser()->getId(),
-			NOTIFICATION_TYPE_SUCCESS,
+			Notification::NOTIFICATION_TYPE_SUCCESS,
 			array('contents' => __('common.changesSaved'))
 		);
 		return parent::execute(...$functionArgs);
@@ -240,15 +253,18 @@ class JournalPaymentSettingsForm extends Form {
 	private function paymentStaffOptions() {
 		$context = Application::get()->getRequest()->getContext();
 		if (!$context) return array();
-		$rows = Capsule::table('user_user_groups as uug')
+		$rows = DB::table('user_user_groups as uug')
 			->join('user_groups as ug', 'ug.user_group_id', '=', 'uug.user_group_id')
 			->where('ug.context_id', (int) $context->getId())
-			->whereIn('ug.role_id', array(ROLE_ID_MANAGER, ROLE_ID_SUB_EDITOR))
+			->whereIn('ug.role_id', array(Role::ROLE_ID_MANAGER, Role::ROLE_ID_SUB_EDITOR))
+			// OJS 3.5 keeps ended role memberships; only current ones are eligible.
+			->where(function ($active) {
+				$active->whereNull('uug.date_end')->orWhere('uug.date_end', '>', date('Y-m-d H:i:s'));
+			})
 			->select('uug.user_id')->distinct()->orderBy('uug.user_id')->get();
-		$userDao = DAORegistry::getDAO('UserDAO');
 		$options = array();
 		foreach ($rows as $row) {
-			$user = $userDao->getById((int) $row->user_id);
+			$user = Repo::user()->get((int) $row->user_id);
 			if (!$user) continue;
 			$options[] = array(
 				'id' => (int) $user->getId(),

@@ -3,13 +3,11 @@
 <version>
 	<application>journalPayment</application>
 	<type>plugins.generic</type>
-	<release>1.28.4.0</release>
-	<date>2026-09-14</date>
+	<release>2.0.0.0</release>
+	<date>2026-09-26</date>
 	<!--
-		Do not lazy-load this route provider. Historical releases used changing
-		class names while preserving one plugin-settings identity. Loading the
-		plugin unconditionally ensures its LoadHandler hook is registered even
-		when an older product_class_name remains in the OJS versions table.
+		Keep this plugin always loaded so its LoadHandler hook is registered
+		for public payment pages even when the journal context is not yet known.
 	-->
 	<lazy-load>0</lazy-load>
 	<class>JournalPaymentPlugin</class>
